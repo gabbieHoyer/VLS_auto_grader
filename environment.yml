@@ -1,0 +1,22 @@
+name: my_project_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch
+  - torchvision
+  - pandas
+  - numpy
+  - scikit-learn
+  - opencv
+  - matplotlib
+  - seaborn
+  - wandb
+  - pyyaml
+  - tqdm
+  - pillow
+  - pip
+  - pip:
+      - ultralytics
+      - gradio

@@ -1,0 +1,40 @@
+# Python byte-code and cache files
+*.py[cod]
+__pycache__/
+*.pyo
+*.pyc
+
+# Virtual environment folders and packaging artifacts
+env/
+venv/
+.build/
+develop-eggs/
+dist/
+*.egg-info/
+.eggs/
+
+# Logs and other temporary files
+logs/
+*.log
+
+# Machine learning outputs and model files (avoid including heavy files)
+data/
+outputs/
+inference_outputs/
+models/
+checkpoints/
+*.onnx
+wandb/
+runs/
+work_dir/
+
+# Directories you specified for exclusion (relative to the repository root)
+src/wandb/
+src/dev/
+src/__pycache__/
+src/*.pyc
+src/*.pyo
+
+# Operating system generated files
+.DS_Store
+Thumbs.db

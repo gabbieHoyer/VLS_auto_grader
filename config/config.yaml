@@ -1,0 +1,60 @@
+experiment:
+  name: VLS_3D_Grading_no_pretraining
+  description: "Training model i3d on 3D VLS classification dataset."
+    # pretrained_weights: mskSAM2
+
+paths:
+  data_csv: data/video_data.csv
+
+  save_path: Run_Summaries/
+  log_dir: logs/
+  checkpoint_dir: checkpoints/
+
+  # viz_eval_path: ${paths.save_path}/figs
+  # summary_file: ${experiment.name}_data_summary.csv
+
+training:
+  model_name: i3d
+  num_classes: 3
+  batch_size: 4
+  epochs: 1 #50
+  lr: 1e-4
+  ssl_pretrain: false
+  ssl_epochs: 20
+  ssl_lr: 1e-3
+  num_workers: 4
+
+  module:
+    use_amp: True 
+    clip_grad: 1.0
+    grad_accum: 4
+
+    early_stopping:
+      enabled: True
+      patience: 10
+      min_delta: 0.0001  
+
+  datamodule:
+    video_col: 'Processed_video_path'
+    label_col: 'Sean_Review'
+
+evaluation:
+  split: val
+  save_attention: false
+
+SEED: 42
+distributed: True 
+
+output_configuration:
+  logging_level: INFO 
+
+  work_dir: "work_dir/finetuning"
+  task_name: VLS-3D-Grading
+  # group_name: ${experiment.pretrained_weights}_${datamodule.max_subject_set}_trainSubjects_sliceBalance_${datamodule.balanced}_imgEnc_${module.trainable.image_encoder}_maskDec_${module.trainable.mask_decoder}
+
+  use_wandb: False 
+  visualize: True
+
+  checkpoint_interval: 5      # how often to save the mid-run "latest" checkpoint
+  always_convert_best: true   # if true, always do final checkpoint conversion
+  
