@@ -1,0 +1,54 @@
+experiment:
+  name: VLS_3D_Grading_Hierarchical_MultiGrader_SSL
+  description: "Hierarchical multi-grader training with SSL pretraining."
+
+paths:
+  data_csv: data/video_splits_corrected.csv
+  log_dir: logs
+  checkpoint_dir: checkpoints
+  figures_dir: figures
+  summaries_dir: summaries
+
+output_configuration:
+  work_dir: work_dir/runs
+  task_name: vls_grading
+  use_wandb: false
+  checkpoint_interval: 5
+  logging_level: INFO
+
+training:
+  datamodule:
+    video_col: 'Processed_video_path'
+    label_cols: ['Sean_Review', 'Santiago_Review']
+  model_name: 'i3d'
+  num_base_classes: 4  # Base classes: 1, 2, 3, 4
+  num_subclasses: 5  # Subclasses: a, b, c, d, none
+  num_classes: 8  # For metrics in non-hierarchical mode
+  batch_size: 8
+  num_workers: 4
+  lr: 0.0001
+  ssl_lr: 0.001
+  epochs: 5 #50
+  ssl_epochs: 5 #20
+  ssl_pretrain: true
+  pretrain_method: 'mae' #'contrastive' #'mae', 'moco'
+  subclass_loss_weight: 0.5
+
+  module:
+    use_amp: True
+    clip_grad: 1.0
+    grad_accum: 4
+
+    early_stopping:
+      enabled: True
+      patience: 10
+      min_delta: 0.0001
+
+
+evaluation:
+  split: test
+  checkpoint_path: checkpoints/best_model.pth
+  save_attention: false
+
+distributed: true
+SEED: 42

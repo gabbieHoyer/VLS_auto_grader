@@ -34,6 +34,60 @@ root/
 └── README.md
 ```
 
+├── work_dir/
+│   ├── finetuning/
+│       ├── VLS-3D-Grading/
+│           ├── i3d_ssl_pretrain/
+│           │   ├── Run_1/
+│           │   │   ├── logs/
+│           │   │   │   ├── train.log
+│           │   │   │   ├── eval.log
+│           │   │   ├── checkpoints/
+│           │   │   │   ├── ssl_pretrained.pth
+│           │   │   │   ├── checkpoint_epoch_5.pth
+│           │   │   │   ├── best_model_Run_1.pth
+│           │   │   ├── figures/
+│           │   │   │   ├── cm_Run_1.png
+│           │   │   │   ├── loss_Run_1.png
+│           │   │   │   ├── attn_map_Run_1_batch0_sample0.png
+│           │   │   ├── summaries/
+│           │   │       ├── experiment_summary.txt
+│           ├── vivit_ssl_supervised/
+│               ├── Run_1/
+│                   ├── logs/
+│                   ├── checkpoints/
+│                   ├── figures/
+│                   ├── summaries/
+
+
+----
+work_dir/finetuning/VLS-3D-Grading/
+├── i3d_ssl_supervised/
+│   ├── Run_1/
+│       ├── logs/
+│       │   ├── train.log
+│       │   ├── eval.log
+│       ├── checkpoints/
+│       │   ├── best_model.pth
+│       ├── figures/
+│       │   ├── cm_Run_1.png
+│       │   ├── loss_Run_1.png
+│       ├── summaries/
+├── i3d_ssl_pretrain/
+│   ├── Run_1/
+│       ├── logs/
+│       │   ├── train.log
+│       │   ├── eval.log
+│       ├── checkpoints/
+│       │   ├── ssl_pretrained.pth
+│       │   ├── best_model.pth
+│       ├── figures/
+│       │   ├── cm_Run_1.png
+│       │   ├── loss_Run_1.png
+│       ├── summaries/
+
+
+
 For detailed instructions and examples, see the README in each major subfolder:
 
 - [Dataset Preprocessing](src/dataset_preprocessing/README.md)

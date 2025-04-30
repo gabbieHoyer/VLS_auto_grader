@@ -27,6 +27,9 @@ checkpoints/
 wandb/
 runs/
 work_dir/
+work_dir/dev/
+work_dir/runs/
+config/dev/
 
 # Directories you specified for exclusion (relative to the repository root)
 src/wandb/

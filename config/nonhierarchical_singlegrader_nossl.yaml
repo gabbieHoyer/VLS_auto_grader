@@ -1,0 +1,51 @@
+experiment:
+  name: VLS_3D_Grading_NonHierarchical_SingleGrader_NoSSL
+  description: "Non-hierarchical single-grader training without SSL pretraining."
+
+paths:
+  data_csv: data/video_splits_corrected.csv
+  log_dir: logs
+  checkpoint_dir: checkpoints
+  figures_dir: figures
+  summaries_dir: summaries
+
+output_configuration:
+  work_dir: work_dir/runs
+  task_name: vls_grading
+  use_wandb: false
+  checkpoint_interval: 5
+  logging_level: INFO
+
+training:
+  datamodule:
+    video_col: 'Processed_video_path'
+    label_cols: ['Sean_Review']
+  model_name: 'i3d'
+  num_base_classes: 8
+  num_subclasses: 0
+  num_classes: 8
+  batch_size: 8
+  num_workers: 1 #4
+  lr: 0.0001
+  ssl_lr: 0.001
+  epochs: 5 #50
+  ssl_epochs: 20
+  ssl_pretrain: false
+
+  module:
+    use_amp: True
+    clip_grad: 1.0
+    grad_accum: 4
+
+    early_stopping:
+      enabled: True
+      patience: 10
+      min_delta: 0.0001
+
+evaluation:
+  split: test
+  checkpoint_path: checkpoints/best_model.pth
+  save_attention: false
+
+distributed: true
+SEED: 42

@@ -1,12 +1,39 @@
 import logging
+import torch
 import os
 
-import logging
 from functools import wraps
 
-from . import gpu_setup as GPUSetup
+# from . import gpu_setup as GPUSetup
+from . import GPUSetup
 
 logger = logging.getLogger(__name__)
+
+def setup_logging(config_level, logger):
+    level_mapping = {
+        'DEBUG': logging.DEBUG,
+        'INFO': logging.INFO,
+        'WARNING': logging.WARNING,
+        'ERROR': logging.ERROR,
+        'CRITICAL': logging.CRITICAL,
+    }
+    logging_level = level_mapping.get(config_level, logging.INFO)
+    rank = GPUSetup.get_rank()  # Now uses GPUSetup
+    logging.basicConfig(
+        level=logging_level,
+        format=f'%(asctime)s - %(levelname)s - Rank {rank} - %(filename)s:%(lineno)d - %(funcName)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    logger.info("PyTorch version: %s", torch.__version__)
+    logger.info("CUDA available: %s", torch.cuda.is_available())
+    logger.info("Number of GPUs available: %s", torch.cuda.device_count())
+    if torch.cuda.is_available():
+        for i in range(torch.cuda.device_count()):
+            logger.info("GPU %s: %s", i, torch.cuda.get_device_name(i))
+        logger.info("CUDA_VISIBLE_DEVICES: %s", os.environ.get('CUDA_VISIBLE_DEVICES', 'Not Set'))
+    return logger
+
+
 
 def setup_logger(name, log_dir):
     logger = logging.getLogger(name)
