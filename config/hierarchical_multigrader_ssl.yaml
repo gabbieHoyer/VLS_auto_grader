@@ -29,9 +29,9 @@ training:
   lr: 0.0001
   ssl_lr: 0.001
   epochs: 5 #50
-  ssl_epochs: 5 #20
+  ssl_epochs: 2 #5 #20
   ssl_pretrain: true
-  pretrain_method: 'mae' #'contrastive' #'mae', 'moco'
+  pretrain_method: 'moco' #'mae' #'contrastive' #'mae', 'moco'
   subclass_loss_weight: 0.5
 
   module:

@@ -8,10 +8,9 @@ import numpy as np
 
 from utils import GPUSetup, setup_logger, load_config, determine_run_directory, get_project_root
 from dataset import MultiGraderDataset, PretrainingDataset
-from model import get_model, ContrastiveLoss
+from model import get_model
 from engine import TrainingEngine, PretrainingEngine
-from utils.augmentations import get_transforms, get_ssl_transforms #, get_contrastive_transforms, get_mae_transforms
-from utils.metrics import compute_metrics
+from utils.augmentations import get_transforms, get_ssl_transforms 
 from utils.logger import setup_logging
 
 root = get_project_root()
@@ -166,9 +165,13 @@ def train(cfg):
     # Load pretrained weights if available
     if cfg['training']['ssl_pretrain']:
         checkpoint_path = os.path.join(run_path, cfg['paths']['checkpoint_dir'], 'ssl_pretrained.pth')
+        # state = torch.load(checkpoint_path, map_location=device)
+        # model.load_state_dict(state)
         state = torch.load(checkpoint_path, map_location=device)
-        model.load_state_dict(state)
-
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        print("Missing head keys (to be randomly init'ed):", missing)
+        print("Unexpected keys (ignored):", unexpected)  # Optional: log unexpected keys too
+        
     if GPUSetup.is_distributed():
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
         model = torch.nn.parallel.DistributedDataParallel(

@@ -4,6 +4,7 @@ import cv2
 import numpy as np
 import albumentations as A
 from utils.augmentations import get_ssl_transforms
+from utils.ssl_helpers import apply_masking
 
 class MultiGraderDataset(Dataset):
     def __init__(self, video_paths, labels, transform=None, is_ssl=False, num_frames=16, hierarchical=False):
@@ -156,56 +157,6 @@ class MultiGraderDataset(Dataset):
                     santiago_label = self.map_label(labels[1])
                     return video, [torch.tensor(sean_label), torch.tensor(santiago_label)]
 
-def apply_masking(video, mask_ratio=0.75, patch_size=16):
-    """
-    Apply tube masking to a video tensor for MAE pretraining.
-
-    Args:
-        video (torch.Tensor): Video tensor of shape [C, T, H, W].
-        mask_ratio (float): Fraction of patches to mask.
-        patch_size (int): Size of spatial patches (assumes square patches).
-
-    Returns:
-        tuple: (masked_video, mask)
-            - masked_video (torch.Tensor): Video with masked patches set to 0, shape [C, T, H, W].
-            - mask (torch.Tensor): Binary mask, 1 for masked patches, 0 for kept patches, shape [T, H, W].
-    """
-    C, T, H, W = video.shape
-    assert H % patch_size == 0 and W % patch_size == 0, "H and W must be divisible by patch_size"
-
-    # Compute number of patches
-    num_patches_t = T  # One patch per frame (temporal dimension)
-    num_patches_h = H // patch_size
-    num_patches_w = W // patch_size
-    total_patches = num_patches_t * num_patches_h * num_patches_w
-
-    # Determine number of patches to mask
-    num_mask = int(mask_ratio * total_patches)
-
-    # Create patch indices and shuffle
-    patch_indices = np.arange(total_patches)
-    np.random.shuffle(patch_indices)
-
-    # Select patches to mask
-    mask_indices = patch_indices[:num_mask]
-    keep_indices = patch_indices[num_mask:]
-
-    # Create mask: 1 for masked patches, 0 for kept patches
-    mask = torch.zeros(T, H, W, dtype=torch.float32)
-    for idx in mask_indices:
-        t = idx // (num_patches_h * num_patches_w)
-        h_idx = (idx % (num_patches_h * num_patches_w)) // num_patches_w
-        w_idx = (idx % (num_patches_h * num_patches_w)) % num_patches_w
-        h_start = h_idx * patch_size
-        w_start = w_idx * patch_size
-        mask[t, h_start:h_start + patch_size, w_start:w_start + patch_size] = 1
-
-    # Apply mask to video
-    masked_video = video.clone()
-    mask_expanded = mask.unsqueeze(0)  # [1, T, H, W]
-    masked_video = masked_video * (1 - mask_expanded)  # Set masked patches to 0
-
-    return masked_video, mask
 
 class PretrainingDataset(Dataset):
     def __init__(self, base_dataset, pretrain_method, cfg, ssl_transform=None):
@@ -230,28 +181,44 @@ class PretrainingDataset(Dataset):
         # Get raw video from base dataset (no transform applied yet)
         video, _ = self.base_dataset[idx]  # Ignore labels, video shape: [T, C, H, W]
 
-        if self.pretrain_method in ['contrastive', 'moco']:
+        if self.pretrain_method == 'mae':
+            # transforms → [C,T,H,W]
+            orig = torch.stack([self.transform(f) for f in video]).permute(1,0,2,3)
+            masked, mask, midxs, total = apply_masking(orig, self.mask_ratio, patch_size=16)
+            return {
+                'masked_video':   masked,     # [C,T,H,W]
+                'original_video': orig,       # [C,T,H,W]
+                'mask':           mask,       # [T,H,W]
+                'mask_indices':   midxs,      # [num_masked]
+                'total_patches':  total       # int
+            }
+        
+        elif self.pretrain_method in ['contrastive', 'moco']:
             # Apply transforms to create two augmented views
             video1 = torch.stack([self.transform(frame) for frame in video])
             video2 = torch.stack([self.transform(frame) for frame in video])
             video1 = video1.permute(1, 0, 2, 3)  # [C, T, H, W]
             video2 = video2.permute(1, 0, 2, 3)  # [C, T, H, W]
             return {'video1': video1, 'video2': video2}
-        elif self.pretrain_method == 'mae':
-            # Apply transform to the original video
-            original_video = torch.stack([self.transform(frame) for frame in video])
-            original_video = original_video.permute(1, 0, 2, 3)  # [C, T, H, W]
-            
-            # Apply masking to create the masked video
-            masked_video, mask = apply_masking(original_video, mask_ratio=self.mask_ratio, patch_size=16)
-            return {
-                'masked_video': masked_video,
-                'original_video': original_video,  # Needed for reconstruction loss
-                'mask': mask
-            }
+        
         else:
             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
 
+
+
+# ---------------------------------------------------------------------
+        # elif self.pretrain_method == 'mae':
+        #     # Apply transform to the original video
+        #     original_video = torch.stack([self.transform(frame) for frame in video])
+        #     original_video = original_video.permute(1, 0, 2, 3)  # [C, T, H, W]
+            
+        #     # Apply masking to create the masked video
+        #     masked_video, mask = apply_masking(original_video, mask_ratio=self.mask_ratio, patch_size=16)
+        #     return {
+        #         'masked_video': masked_video,
+        #         'original_video': original_video,  # Needed for reconstruction loss
+        #         'mask': mask
+        #     }
 # ----------------------------------------------------------------
 
 # import torch

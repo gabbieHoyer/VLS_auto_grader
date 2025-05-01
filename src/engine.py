@@ -10,45 +10,15 @@ from utils.metrics import compute_metrics
 from utils.visualization import plot_confusion_matrix, save_attention_maps, plot_loss_curves
 from utils.checkpointing import log_and_checkpoint, final_checkpoint_conversion
 
+# from utils.ssl_losses import ReconstructionLoss, ContrastiveLoss
+from utils.ssl_losses import SimCLRContrastiveLoss, MoCoLoss, ReconstructionLoss
+
 logger = logging.getLogger(__name__)
 
 # Mapping for reconstructing labels in hierarchical case
 BASE_CLASSES = {0: '1', 1: '2', 2: '3', 3: '4'}
 SUBCLASSES = {0: 'a', 1: 'b', 2: 'c', 3: 'd', 4: ''}
 
-class ReconstructionLoss(torch.nn.Module):
-    def __init__(self):
-        super(ReconstructionLoss, self).__init__()
-
-    def forward(self, reconstructed, original, mask):
-        """
-        Compute reconstruction loss for MAE, focusing on masked regions.
-
-        Args:
-            reconstructed: Reconstructed video tensor [batch, channels, time, height, width].
-            original: Original video tensor [batch, channels, time, height, width].
-            mask: Binary mask [batch, time, height, width], 1 for masked regions.
-        """
-        # Expand mask to match channels dimension
-        mask = mask.unsqueeze(1)  # [batch, 1, time, height, width]
-        # Compute MSE loss only on masked regions
-        diff = (reconstructed - original) ** 2
-        loss = (diff * mask).sum() / (mask.sum() + 1e-6)  # Avoid division by zero
-        return loss
-
-class ContrastiveLoss(torch.nn.Module):
-    def __init__(self, temperature=0.5):
-        super(ContrastiveLoss, self).__init__()
-        self.temperature = temperature
-
-    def forward(self, feat1, feat2):
-        batch_size = feat1.size(0)
-        feat1 = torch.nn.functional.normalize(feat1, dim=1)
-        feat2 = torch.nn.functional.normalize(feat2, dim=1)
-        sim_matrix = torch.mm(feat1, feat2.t()) / self.temperature
-        labels = torch.arange(batch_size).to(feat1.device)
-        loss = torch.nn.functional.cross_entropy(sim_matrix, labels)
-        return loss
 
 class TrainingEngine:
     def __init__(self, model, optimizer, scheduler, criterion, train_loader, val_loader, cfg, run_path, device, start_epoch=0):
@@ -403,12 +373,23 @@ class PretrainingEngine:
         self.clip_grad = cfg['training']['module'].get('clip_grad', 1.0)
         self.grad_accum = cfg['training']['module'].get('grad_accum', 1)
         self.model_save_path, self.run_id = self.setup_experiment_environment()
+                
         if pretrain_method == 'contrastive':
-            self.criterion = ContrastiveLoss(temperature=0.5)
+            self.criterion = SimCLRContrastiveLoss(
+                temperature=cfg['training'].get('ssl_temperature', 0.07)
+            )
+        elif pretrain_method == 'moco':
+            # pass the queue buffer from the model
+            qbuf = model.module.queue if hasattr(model, 'module') else model.queue
+            self.criterion = MoCoLoss(
+                queue=qbuf,
+                temperature=cfg['training'].get('ssl_temperature', 0.07)
+            )
         elif pretrain_method == 'mae':
             self.criterion = ReconstructionLoss()
         else:
             raise ValueError(f"Unknown pretrain_method: {pretrain_method}")
+
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['training']['ssl_lr'], weight_decay=0.01)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=cfg['training']['ssl_epochs'])
 
@@ -431,33 +412,48 @@ class PretrainingEngine:
         batch_count = 0
 
         for batch_idx, batch in enumerate(self.loader):
+            
             if self.pretrain_method == 'contrastive':
-                videos1, videos2 = batch['video1'], batch['video2']
-                videos1, videos2 = videos1.to(self.device), videos2.to(self.device)
+                v1 = batch['video1'].to(self.device)
+                v2 = batch['video2'].to(self.device)
                 with autocast(enabled=self.use_amp):
-                    feat1 = self.model(videos1)
-                    feat2 = self.model(videos2)
-                    loss = self.criterion(feat1, feat2)
+                    q, k = self.model(v1, v2)
+                    loss = self.criterion(q, k)
+
+            elif self.pretrain_method == 'moco':
+                v = batch['video1'].to(self.device)
+                with autocast(enabled=self.use_amp):
+                    q, k = self.model(v)                     # updates the queue internally
+                    loss = self.criterion(q, k)
+
             elif self.pretrain_method == 'mae':
-                masked_videos = batch['masked_video'].to(self.device)
-                original_videos = batch['masked_video'].to(self.device)  # Original for reconstruction
+                mvid = batch['masked_video'].to(self.device)
+                orig = batch['original_video'].to(self.device)
                 mask = batch['mask'].to(self.device)
+                # indices of *which* patches were masked
+                midxs = batch['mask_indices'].to(self.device)
+
                 with autocast(enabled=self.use_amp):
-                    reconstructed = self.model(masked_videos)
-                    loss = self.criterion(reconstructed, original_videos, mask)
+                    # pass the mask_indices so the model only scatters those predictions
+                    recon = self.model(mvid, mask_indices=midxs)
+                    loss = self.criterion(recon, orig, mask)
 
             self.scaler.scale(loss / self.grad_accum).backward()
+
+            # compute loss, backward, optimizer.step(), scaler.update(), zero_grad()
             if (batch_idx + 1) % self.grad_accum == 0:
+                # after loss.backward() and every grad_accum steps:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
-                self.optimizer.zero_grad()
+                self.scaler.step(self.optimizer)   # 1) optimizer
+                self.scaler.update()               # 2) update scale
                 if self.scheduler:
-                    self.scheduler.step()
+                    self.scheduler.step()          # 3) update LR
+                self.optimizer.zero_grad()         # 4) zero grads
 
             total_loss += loss.item() * self.grad_accum
             batch_count += 1
+
             if batch_idx % 10 == 0 and GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}")
 
@@ -696,3 +692,28 @@ class EvalEngine:
                     run_id=self.run_id,
                     title="Confusion Matrix (Santiago_Review)"
                 )
+
+
+
+
+
+            # elif self.pretrain_method == 'mae':
+            #     mvid = batch['masked_video'].to(self.device)
+            #     orig = batch['original_video'].to(self.device)
+            #     mask = batch['mask'].to(self.device)
+            #     with autocast(enabled=self.use_amp):
+            #         recon = self.model(mvid)
+            #         loss = self.criterion(recon, orig, mask)
+
+
+                # self.scaler.unscale_(self.optimizer)
+                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+                # self.scaler.step(self.optimizer)
+                # self.scaler.update()
+                # self.optimizer.zero_grad()
+                # if self.scheduler:
+                #     self.scheduler.step()
+
+                    # self.scaler.step(self.optimizer)
+                    # self.scaler.update()
+                    # self.optimizer.zero_grad()
