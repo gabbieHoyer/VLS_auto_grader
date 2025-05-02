@@ -16,7 +16,7 @@ save_on_master = GPUSetup.save_on_master
 
 # Re-export other modules
 from . import logger
-from . import experiment_setup
+# from . import experiment_setup
 from . import config_loader
 from . import augmentations
 from . import checkpointing
@@ -24,10 +24,10 @@ from . import visualization
 # from . import ssl_losses
 
 # Re-export specific functions from logger
-from .logger import setup_logger, main_process_only, log_info, wandb_log
+from .logger import main_process_only, log_info, wandb_log  #setup_logger,
 
 # Re-export specific functions from experiment_setup
-from .experiment_setup import get_project_root, determine_run_directory, generate_group_name
+# from .experiment_setup import get_project_root, determine_run_directory, generate_group_name
 
 # Re-export specific functions from config_loader
 from .config_loader import load_config
@@ -49,7 +49,7 @@ __all__ = [
     # Modules
     "gpu_setup",
     "logger",
-    "experiment_setup",
+    # "experiment_setup",
     "config_loader",
     "augmentations",
     "checkpointing",
@@ -65,13 +65,13 @@ __all__ = [
     "is_main_process",
     "reduce_tensor",
     "save_on_master",
-    "setup_logger",
+    # "setup_logger",
     "main_process_only",
     "log_info",
     "wandb_log",
-    "get_project_root",
-    "determine_run_directory",
-    "generate_group_name",
+    # "get_project_root",
+    # "determine_run_directory",
+    # "generate_group_name",
     "load_config",
     "get_transforms",
     "get_ssl_transforms",

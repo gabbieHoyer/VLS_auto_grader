@@ -28,11 +28,18 @@ training:
   num_workers: 4
   lr: 0.0001
   ssl_lr: 0.001
-  epochs: 5 #50
-  ssl_epochs: 2 #20
+  epochs: 1 #5 #50
+  ssl_epochs: 1 #2 #20
   ssl_pretrain: true
-  pretrain_method: 'contrastive' #'mae', 'moco'
+  pretrain_method: 'moco' # 'contrastive' #'mae', 'moco'
   subclass_loss_weight: 0.5
+
+  mask_ratio: 0.5           # Initial mask ratio for MAE
+  end_mask_ratio: 0.75      # Final mask ratio for curriculum learning
+  patch_size: 16            # Patch size for masking
+  temporal_consistency: 'full'  # 'full', 'partial', or 'none'
+  change_interval: 5        # For 'partial' mode: change mask every 5 frames
+  # ssl_epochs: 100           # Total epochs for pretraining
 
   module:
     use_amp: True

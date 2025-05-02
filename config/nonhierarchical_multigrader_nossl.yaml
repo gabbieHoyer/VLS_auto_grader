@@ -28,7 +28,7 @@ training:
   num_workers: 1 #4
   lr: 0.0001
   ssl_lr: 0.001
-  epochs: 5 #50
+  epochs: 50
   ssl_epochs: 20
   ssl_pretrain: false
 

@@ -8,7 +8,9 @@ import numpy as np
 from utils import GPUSetup, log_info, wandb_log
 from utils.metrics import compute_metrics
 from utils.visualization import plot_confusion_matrix, save_attention_maps, plot_loss_curves
+from utils.visualization import plot_augmentations, plot_pretrain_augmentations
 from utils.checkpointing import log_and_checkpoint, final_checkpoint_conversion
+from utils.wandb_utils import init_wandb_run
 
 # from utils.ssl_losses import ReconstructionLoss, ContrastiveLoss
 from utils.ssl_losses import SimCLRContrastiveLoss, MoCoLoss, ReconstructionLoss
@@ -21,7 +23,7 @@ SUBCLASSES = {0: 'a', 1: 'b', 2: 'c', 3: 'd', 4: ''}
 
 
 class TrainingEngine:
-    def __init__(self, model, optimizer, scheduler, criterion, train_loader, val_loader, cfg, run_path, device, start_epoch=0):
+    def __init__(self, model, optimizer, scheduler, criterion, train_loader, val_loader, cfg, run_id, run_path, device, start_epoch=0):
         self.model = model.to(device)
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -29,7 +31,7 @@ class TrainingEngine:
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.cfg = cfg
-        self.run_path = run_path
+        # self.run_path = run_path
         self.device = device
         self.start_epoch = start_epoch
         self.use_amp = cfg['training']['module'].get('use_amp', False)
@@ -39,22 +41,21 @@ class TrainingEngine:
         self.early_stopping = cfg['training']['module'].get('early_stopping', {})
         self.best_val_metric = 0.0
         self.no_improve_epochs = 0
-        self.model_save_path, self.run_id = self.setup_experiment_environment()
+
         self.hierarchical_mode = self._check_hierarchical_mode()
         self.single_grader = self._check_single_grader()
 
-    def setup_experiment_environment(self):
-        model_save_path = self.run_path
-        run_id = datetime.now().strftime("%Y%m%d-%H%M")
-        if self.cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
-            import wandb
-            wandb.init(
-                project=self.cfg['output_configuration']['task_name'],
-                config=self.cfg['training'],
-                name=run_id,
-                tags=['train', self.cfg['experiment']['name'], 'supervised']
+        self.run_id = run_id
+        self.model_save_path = run_path
+
+        # only on the main process, kick off wandb
+        if cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
+            # for TrainingEngine it’s always finetune
+            self.wandb_run = init_wandb_run(
+                cfg, self.run_id, 
+                stage='finetune',
+                tags=['train', cfg['experiment']['name'], 'supervised']
             )
-        return model_save_path, run_id
 
     def _check_hierarchical_mode(self):
         if self.train_loader is None:
@@ -108,19 +109,30 @@ class TrainingEngine:
                         all_subclass_preds.append(preds.cpu())
 
             self.scaler.scale(loss / self.grad_accum).backward()
+            
             if (batch_idx + 1) % self.grad_accum == 0:
                 self.scaler.unscale_(self.optimizer)
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
+                # self.optimizer.zero_grad()
+                # if self.scheduler:
+                #     self.scheduler.step()
                 self.optimizer.zero_grad()
-                if self.scheduler:
-                    self.scheduler.step()
 
             total_loss += loss.item() * self.grad_accum
+
             batch_count += 1
             if batch_idx % 10 == 0 and GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+        #  Flush any leftover gradients at end of epoch
+        if (batch_idx + 1) % self.grad_accum != 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            self.optimizer.zero_grad()
 
         if GPUSetup.is_distributed():
             total_loss_tensor = torch.tensor(total_loss, device=self.device)
@@ -276,6 +288,16 @@ class TrainingEngine:
         latest_val_base_preds, latest_val_base_labels = None, None
         latest_val_subclass_preds, latest_val_subclass_labels = None, None
 
+        if GPUSetup.is_main_process():
+            plot_augmentations(
+                self.train_loader,
+                self.model_save_path,
+                self.cfg['paths']['figures_dir'],
+                self.run_id,
+                prefix='train',
+                n_frames=4
+            )
+
         for epoch in range(self.start_epoch, epochs):
             if GPUSetup.is_distributed() and hasattr(self.train_loader.sampler, 'set_epoch'):
                 self.train_loader.sampler.set_epoch(epoch)
@@ -286,6 +308,10 @@ class TrainingEngine:
             if val_base_preds is not None and val_base_labels is not None:
                 latest_val_base_preds, latest_val_base_labels = val_base_preds, val_base_labels
                 latest_val_subclass_preds, latest_val_subclass_labels = val_subclass_preds, val_subclass_labels
+
+            # step scheduler once per epoch (after train_epoch)
+            if self.scheduler is not None:
+                self.scheduler.step()
 
             if GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
@@ -348,13 +374,13 @@ class TrainingEngine:
 
 
 class PretrainingEngine:
-    def __init__(self, model, loader, cfg, run_path, device, pretrain_method, start_epoch=0):
+    def __init__(self, model, pretrain_loader, cfg, run_id, run_path, device, pretrain_method, start_epoch=0):
         """
         Engine for pretraining methods like contrastive learning or masked autoencoders.
 
         Args:
             model: The model to train.
-            loader: DataLoader for pretraining data.
+            pretrain_loader: DataLoader for pretraining data. (may match train set in some cases with limited data or fully labeled data)
             cfg: Configuration dictionary.
             run_path: Path for saving checkpoints and logs.
             device: Device to run training on.
@@ -362,9 +388,10 @@ class PretrainingEngine:
             start_epoch: Starting epoch for resuming training.
         """
         self.model = model.to(device)
-        self.loader = loader
+        self.pretrain_loader = pretrain_loader
+        self.dataset = pretrain_loader.dataset  # Store reference to dataset
         self.cfg = cfg
-        self.run_path = run_path
+        # self.run_path = run_path
         self.device = device
         self.pretrain_method = pretrain_method
         self.start_epoch = start_epoch
@@ -372,8 +399,7 @@ class PretrainingEngine:
         self.scaler = GradScaler(enabled=self.use_amp)
         self.clip_grad = cfg['training']['module'].get('clip_grad', 1.0)
         self.grad_accum = cfg['training']['module'].get('grad_accum', 1)
-        self.model_save_path, self.run_id = self.setup_experiment_environment()
-                
+ 
         if pretrain_method == 'contrastive':
             self.criterion = SimCLRContrastiveLoss(
                 temperature=cfg['training'].get('ssl_temperature', 0.07)
@@ -393,25 +419,29 @@ class PretrainingEngine:
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['training']['ssl_lr'], weight_decay=0.01)
         self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=cfg['training']['ssl_epochs'])
 
-    def setup_experiment_environment(self):
-        model_save_path = self.run_path
-        run_id = datetime.now().strftime("%Y%m%d-%H%M")
-        if self.cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
-            import wandb
-            wandb.init(
-                project=self.cfg['output_configuration']['task_name'],
-                config=self.cfg['training'],
-                name=run_id,
-                tags=['pretrain', self.cfg['experiment']['name'], self.pretrain_method]
-            )
-        return model_save_path, run_id
+        self.run_id = run_id
+        self.model_save_path = run_path
 
+        # only on the main process, kick off wandb
+        if cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
+            # for TrainingEngine it’s always finetune
+            self.wandb_run = init_wandb_run(
+                cfg, self.run_id, 
+                stage='pretrain',
+                tags=['pretrain', cfg['experiment']['name'], self.pretrain_method]
+                )
+            
     def train_epoch(self, epoch):
         self.model.train()
+
+        # 1) reset peak‐mem stats for this epoch
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats(self.device)
+
         total_loss = 0
         batch_count = 0
 
-        for batch_idx, batch in enumerate(self.loader):
+        for batch_idx, batch in enumerate(self.pretrain_loader):
             
             if self.pretrain_method == 'contrastive':
                 v1 = batch['video1'].to(self.device)
@@ -442,20 +472,42 @@ class PretrainingEngine:
 
             # compute loss, backward, optimizer.step(), scaler.update(), zero_grad()
             if (batch_idx + 1) % self.grad_accum == 0:
-                # after loss.backward() and every grad_accum steps:
+                # 2) unscale, clip, step, LR, zero_grad
                 self.scaler.unscale_(self.optimizer)
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), self.clip_grad
+                )
                 self.scaler.step(self.optimizer)   # 1) optimizer
                 self.scaler.update()               # 2) update scale
-                if self.scheduler:
-                    self.scheduler.step()          # 3) update LR
+                # if self.scheduler:
+                #     self.scheduler.step()          # 3) update LR
                 self.optimizer.zero_grad()         # 4) zero grads
+
+                # 3) log peak memory after each step
+                if torch.cuda.is_available() and GPUSetup.is_main_process():
+                    peak = torch.cuda.max_memory_allocated(self.device) / (1024**2)
+                    logger.info(f"[Epoch {epoch} Batch {batch_idx}] peak GPU mem: {peak:.1f} MB")
 
             total_loss += loss.item() * self.grad_accum
             batch_count += 1
 
             if batch_idx % 10 == 0 and GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+
+        # 4) flush any leftover partial‐accumulated gradients
+        if (batch_idx + 1) % self.grad_accum != 0:
+            self.scaler.unscale_(self.optimizer)
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
+            self.scaler.step(self.optimizer)
+            self.scaler.update()
+            # if self.scheduler:
+            #     self.scheduler.step()
+            self.optimizer.zero_grad()
+
+            # log peak‐memory for the final partial step
+            if torch.cuda.is_available() and GPUSetup.is_main_process():
+                peak = torch.cuda.max_memory_allocated(self.device) / (1024**2)
+                logger.info(f"[Epoch {epoch} Batch {batch_idx} (final flush)] peak GPU mem: {peak:.1f} MB")
 
         if GPUSetup.is_distributed():
             total_loss_tensor = torch.tensor(total_loss, device=self.device)
@@ -469,11 +521,28 @@ class PretrainingEngine:
 
     def train(self, epochs):
         losses = {'train': []}
+
+        if GPUSetup.is_main_process():
+            plot_pretrain_augmentations(
+                self.pretrain_loader,
+                self.model_save_path,
+                self.cfg['paths']['figures_dir'],
+                self.run_id,
+                pretrain_method=self.pretrain_method,
+                n_frames=4
+            )
+
         for epoch in range(self.start_epoch, epochs):
-            if GPUSetup.is_distributed() and hasattr(self.loader.sampler, 'set_epoch'):
-                self.loader.sampler.set_epoch(epoch)
+            # Set the epoch on the dataset for curriculum learning (e.g., MAE mask ratio)
+            self.dataset.set_epoch(epoch)
+
+            if GPUSetup.is_distributed() and hasattr(self.pretrain_loader.sampler, 'set_epoch'):
+                self.pretrain_loader.sampler.set_epoch(epoch)
 
             train_loss = self.train_epoch(epoch)
+            # one scheduler step per epoch
+            if self.scheduler:
+                self.scheduler.step()
 
             if GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Train Loss: {train_loss:.4f}")
@@ -497,223 +566,318 @@ class PretrainingEngine:
             wandb.finish()
 
 # -------------------------------------------------------------------------------- #
-
+# -------------------------------------------------------------------------------- #
 class EvalEngine:
-    def __init__(self, model, eval_loader, cfg, run_path, device, save_attention=False):
+    def __init__(
+        self, model, test_loader, cfg, device,
+        save_attention=False, output_dir=None
+    ):
         self.model = model.to(device)
-        self.eval_loader = eval_loader
+        self.test_loader = test_loader
         self.cfg = cfg
-        self.run_path = run_path
         self.device = device
-        self.save_attention = save_attention and cfg['training']['model_name'] == 'vivit'
+        self.save_attention = save_attention
+        self.output_dir = output_dir
         self.use_amp = cfg['training']['module'].get('use_amp', False)
-        self.model_save_path, self.run_id = self.setup_experiment_environment()
-        self.hierarchical_mode = self._check_hierarchical_mode()
-        self.single_grader = self._check_single_grader()
 
-    def setup_experiment_environment(self):
-        model_save_path = self.run_path
-        run_id = datetime.now().strftime("%Y%m%d-%H%M")
-        if self.cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
-            import wandb
-            wandb.init(
-                project=self.cfg['output_configuration']['task_name'],
-                config=self.cfg['training'],
-                name=run_id,
-                tags=['eval', self.cfg['experiment']['name']]
+        # detect modes
+        self.hierarchical = isinstance(
+            next(iter(test_loader)), dict
+        ) and 'base_label' in next(iter(test_loader))
+        self.single_grader = False
+        if not self.hierarchical:
+            batch = next(iter(test_loader))
+            self.single_grader = (
+                len(batch[1]) == 1 or 
+                (len(batch[1]) == 2 and torch.equal(batch[1][0], batch[1][1]))
             )
-        return model_save_path, run_id
 
-    def _check_hierarchical_mode(self):
-        batch = next(iter(self.eval_loader))
-        return isinstance(batch, dict) and 'base_label' in batch
-
-    def _check_single_grader(self):
-        batch = next(iter(self.eval_loader))
-        if self.hierarchical_mode:
-            return False
-        return len(batch[1]) == 1 or (len(batch[1]) == 2 and torch.equal(batch[1][0], batch[1][1]))
-
-    def process_batch(self, batch, batch_idx=0):
-        if self.hierarchical_mode:
-            videos = batch['video'].to(self.device)
-            base_labels = batch['base_label'].to(self.device)
-            subclass_labels = batch['subclass_label'].to(self.device)
-        else:
-            videos, labels = batch
-            videos = videos.to(self.device)
-            labels = [label.to(self.device) for label in labels]
-            sean_labels = labels[0]
-            santiago_labels = labels[0] if self.single_grader else labels[1]
-
-        with torch.no_grad():
-            with autocast(enabled=self.use_amp):
-                outputs = self.model(videos)
-                if self.hierarchical_mode:
-                    base_preds = torch.argmax(outputs[0], dim=1)
-                    subclass_preds = torch.argmax(outputs[1], dim=1)
-                    preds = (base_preds, subclass_preds)
-                else:
-                    preds = torch.argmax(outputs, dim=1)
-
-                attention_maps = None
-                if self.save_attention:
-                    attention_maps = self.model.get_attention_maps(videos)
-
-        if self.hierarchical_mode:
-            return outputs, preds, (base_labels, subclass_labels), attention_maps
-        else:
-            return outputs, preds, (sean_labels, santiago_labels), attention_maps
+        # wandb
+        self.use_wandb = cfg['output_configuration'].get('use_wandb', False)
+        if self.use_wandb and GPUSetup.is_main_process():
+            from utils.wandb_utils import init_wandb_run
+            self.wandb = init_wandb_run(
+                cfg, datetime.now().strftime("%Y%m%d-%H%M"),
+                stage='eval',
+                tags=['eval', cfg['experiment']['name']]
+            )
 
     def evaluate(self):
         self.model.eval()
-        all_outputs = []
-        all_preds = []
-        all_labels = []
+        all_base_preds, all_sub_preds = [], []
+        all_base_labels, all_sub_labels = [], []
 
-        for batch_idx, batch in enumerate(self.eval_loader):
-            outputs, preds, labels, attention_maps = self.process_batch(batch, batch_idx)
+        with torch.no_grad():
+            for idx, batch in enumerate(self.test_loader):
+                if self.hierarchical:
+                    videos = batch['video'].to(self.device)
+                    base_labels = batch['base_label'].to(self.device)
+                    sub_labels = batch['subclass_label'].to(self.device)
+                    with autocast(enabled=self.use_amp):
+                        out_base, out_sub = self.model(videos)
+                    preds_base = torch.argmax(out_base, dim=1)
+                    preds_sub = torch.argmax(out_sub, dim=1)
+                else:
+                    videos, labels = batch
+                    videos = videos.to(self.device)
+                    labels = [l.to(self.device) for l in labels]
+                    base_labels = labels[0]
+                    with autocast(enabled=self.use_amp):
+                        outputs = self.model(videos)
+                    preds_base = torch.argmax(outputs, dim=1)
+                    if not self.single_grader:
+                        preds_sub = preds_base.clone()
+                        sub_labels = labels[1]
+                    else:
+                        preds_sub = preds_base.clone()
+                        sub_labels = base_labels
 
-            if self.hierarchical_mode:
-                base_outputs, subclass_outputs = outputs
-                base_preds, subclass_preds = preds
-                base_labels, subclass_labels = labels
-                all_outputs.append((base_outputs.detach().cpu(), subclass_outputs.detach().cpu()))
-                all_preds.append((base_preds.detach().cpu(), subclass_preds.detach().cpu()))
-                all_labels.append((base_labels.detach().cpu(), subclass_labels.detach().cpu()))
-            else:
-                all_outputs.append(outputs.detach().cpu())
-                all_preds.append(preds.detach().cpu())
-                all_labels.append((labels[0].detach().cpu(), labels[1].detach().cpu()))
+                all_base_preds.append(preds_base.cpu())
+                all_base_labels.append(base_labels.cpu())
+                all_sub_preds.append(preds_sub.cpu())
+                all_sub_labels.append(sub_labels.cpu())
 
-            if self.save_attention and attention_maps is not None and GPUSetup.is_main_process():
-                save_attention_maps(
-                    attention_maps=attention_maps,
-                    video_paths=[f"batch_{batch_idx}_sample_{i}" for i in range(len(batch[0]))],
-                    save_dir=os.path.join(self.model_save_path, 'attention_maps'),
-                    run_id=self.run_id,
-                    batch_idx=batch_idx
-                )
+                if self.save_attention:
+                    save_attention_maps(
+                        inputs=videos, outputs=
+                        (out_base, out_sub) if self.hierarchical else outputs,
+                        save_dir=self.output_dir, batch_idx=idx
+                    )
 
-            if batch_idx % 10 == 0:
-                log_info(f"Evaluation Batch {batch_idx}")
+        # flatten
+        base_p = torch.cat(all_base_preds)
+        base_l = torch.cat(all_base_labels)
+        sub_p = torch.cat(all_sub_preds)
+        sub_l = torch.cat(all_sub_labels)
 
-        if self.hierarchical_mode:
-            all_base_outputs = torch.cat([x[0] for x in all_outputs])
-            all_subclass_outputs = torch.cat([x[1] for x in all_outputs])
-            all_outputs = (all_base_outputs, all_subclass_outputs)
-            all_base_preds = torch.cat([x[0] for x in all_preds])
-            all_subclass_preds = torch.cat([x[1] for x in all_preds])
-            all_preds = (all_base_preds, all_subclass_preds)
-            all_base_labels = torch.cat([x[0] for x in all_labels])
-            all_subclass_labels = torch.cat([x[1] for x in all_labels])
-            all_labels = (all_base_labels, all_subclass_labels)
-        else:
-            all_outputs = torch.cat(all_outputs)
-            all_preds = torch.cat(all_preds)
-            all_sean_labels = torch.cat([x[0] for x in all_labels])
-            all_santiago_labels = torch.cat([x[1] for x in all_labels])
-            all_labels = (all_sean_labels, all_santiago_labels)
-
+        # compute
         metrics = {}
-        if self.hierarchical_mode:
-            base_metrics = compute_metrics(all_base_labels, all_base_preds, self.cfg['training']['num_base_classes'])
-            subclass_metrics = compute_metrics(all_subclass_labels, all_subclass_preds, self.cfg['training']['num_subclasses'])
-            metrics.update({
-                'base_accuracy': base_metrics['accuracy'],
-                'base_f1': base_metrics['f1_per_class'],
-                'base_precision': base_metrics['precision'],
-                'base_recall': base_metrics['recall'],
-                'subclass_accuracy': subclass_metrics['accuracy'],
-                'subclass_f1': subclass_metrics['f1_per_class'],
-                'subclass_precision': subclass_metrics['precision'],
-                'subclass_recall': subclass_metrics['recall']
-            })
+        if self.hierarchical:
+            base_m = compute_metrics(base_l.numpy(), base_p.numpy(), self.cfg['training']['num_base_classes'])
+            sub_m = compute_metrics(sub_l.numpy(), sub_p.numpy(), self.cfg['training']['num_subclasses'])
+            metrics = {
+                'base_accuracy': base_m['accuracy'],
+                'base_f1': base_m['f1_per_class'],
+                'sub_accuracy': sub_m['accuracy'],
+                'sub_f1': sub_m['f1_per_class']
+            }
         else:
-            sean_metrics = compute_metrics(all_sean_labels, all_preds, self.cfg['training']['num_classes'])
-            metrics.update({
-                'sean_accuracy': sean_metrics['accuracy'],
-                'sean_f1': sean_metrics['f1_per_class'],
-                'sean_precision': sean_metrics['precision'],
-                'sean_recall': sean_metrics['recall']
-            })
+            base_m = compute_metrics(base_l.numpy(), base_p.numpy(), self.cfg['training']['num_classes'])
+            metrics = {
+                'base_accuracy': base_m['accuracy'],
+                'base_f1': base_m['f1_per_class']
+            }
             if not self.single_grader:
-                santiago_metrics = compute_metrics(all_santiago_labels, all_preds, self.cfg['training']['num_classes'])
+                sub_m = compute_metrics(sub_l.numpy(), sub_p.numpy(), self.cfg['training']['num_classes'])
                 metrics.update({
-                    'santiago_accuracy': santiago_metrics['accuracy'],
-                    'santiago_f1': santiago_metrics['f1_per_class'],
-                    'santiago_precision': santiago_metrics['precision'],
-                    'santiago_recall': santiago_metrics['recall']
+                    'sub_accuracy': sub_m['accuracy'],
+                    'sub_f1': sub_m['f1_per_class']
                 })
 
-        if GPUSetup.is_distributed():
-            metrics_tensor = torch.tensor([metrics[k] for k in sorted(metrics.keys()) if isinstance(metrics[k], (int, float))],
-                                         dtype=torch.float32, device=self.device)
-            torch.distributed.all_reduce(metrics_tensor, op=torch.distributed.ReduceOp.SUM)
-            metrics_tensor /= GPUSetup.get_world_size()
-            for idx, key in enumerate(sorted(metrics.keys())):
-                if isinstance(metrics[key], (int, float)):
-                    metrics[key] = metrics_tensor[idx].item()
-
-        if GPUSetup.is_main_process():
-            if self.cfg['output_configuration'].get('use_wandb'):
-                wandb_log({f"eval_{k}": v for k, v in metrics.items() if isinstance(v, (int, float))})
-            self.post_evaluation_actions(metrics, all_labels, all_preds)
+        # log
+        if self.use_wandb and GPUSetup.is_main_process():
+            wandb_log(metrics)
 
         return metrics
 
-    def post_evaluation_actions(self, metrics, true_labels, pred_labels):
-        if not GPUSetup.is_main_process():
-            return
-        if self.hierarchical_mode:
-            all_base_labels, all_subclass_labels = true_labels
-            all_base_preds, all_subclass_preds = pred_labels
-            pred_labels = [f"{BASE_CLASSES[base.item()]}{SUBCLASSES[subclass.item()]}" if SUBCLASSES[subclass.item()] else BASE_CLASSES[base.item()]
-                           for base, subclass in zip(all_base_preds, all_subclass_preds)]
-            true_labels = [f"{BASE_CLASSES[base.item()]}{SUBCLASSES[subclass.item()]}" if SUBCLASSES[subclass.item()] else BASE_CLASSES[base.item()]
-                           for base, subclass in zip(all_base_labels, all_subclass_labels)]
-            plot_confusion_matrix(
-                metrics={'true_labels': np.array(true_labels), 'pred_labels': np.array(pred_labels)},
-                model_save_path=self.model_save_path,
-                run_id=self.run_id
-            )
-        else:
-            all_sean_labels, all_santiago_labels = true_labels
-            plot_confusion_matrix(
-                metrics={'true_labels': all_sean_labels.numpy(), 'pred_labels': pred_labels.numpy()},
-                model_save_path=self.model_save_path,
-                run_id=self.run_id,
-                title="Confusion Matrix (Sean_Review)"
-            )
-            if not self.single_grader:
-                plot_confusion_matrix(
-                    metrics={'true_labels': all_santiago_labels.numpy(), 'pred_labels': pred_labels.numpy()},
-                    model_save_path=self.model_save_path,
-                    run_id=self.run_id,
-                    title="Confusion Matrix (Santiago_Review)"
-                )
 
+# -------------------------------------------------------------------------------- #
+# -------------------------------------------------------------------------------- #
 
+# class EvalEngine:
+#     def __init__(self, model, eval_loader, cfg, run_path, device, save_attention=False):
+#         self.model = model.to(device)
+#         self.eval_loader = eval_loader
+#         self.cfg = cfg
+#         self.run_path = run_path
+#         self.device = device
+#         self.save_attention = save_attention and cfg['training']['model_name'] == 'vivit'
+#         self.use_amp = cfg['training']['module'].get('use_amp', False)
+#         self.model_save_path, self.run_id = self.setup_experiment_environment()
+#         self.hierarchical_mode = self._check_hierarchical_mode()
+#         self.single_grader = self._check_single_grader()
 
+#     def setup_experiment_environment(self):
+#         model_save_path = self.run_path
+#         run_id = datetime.now().strftime("%Y%m%d-%H%M")
+#         if self.cfg['output_configuration'].get('use_wandb') and GPUSetup.is_main_process():
+#             import wandb
+#             wandb.init(
+#                 project=self.cfg['output_configuration']['task_name'],
+#                 config=self.cfg['training'],
+#                 name=run_id,
+#                 tags=['eval', self.cfg['experiment']['name']]
+#             )
+#         return model_save_path, run_id
 
+#     def _check_hierarchical_mode(self):
+#         batch = next(iter(self.eval_loader))
+#         return isinstance(batch, dict) and 'base_label' in batch
 
-            # elif self.pretrain_method == 'mae':
-            #     mvid = batch['masked_video'].to(self.device)
-            #     orig = batch['original_video'].to(self.device)
-            #     mask = batch['mask'].to(self.device)
-            #     with autocast(enabled=self.use_amp):
-            #         recon = self.model(mvid)
-            #         loss = self.criterion(recon, orig, mask)
+#     def _check_single_grader(self):
+#         batch = next(iter(self.eval_loader))
+#         if self.hierarchical_mode:
+#             return False
+#         return len(batch[1]) == 1 or (len(batch[1]) == 2 and torch.equal(batch[1][0], batch[1][1]))
 
+#     def process_batch(self, batch, batch_idx=0):
+#         if self.hierarchical_mode:
+#             videos = batch['video'].to(self.device)
+#             base_labels = batch['base_label'].to(self.device)
+#             subclass_labels = batch['subclass_label'].to(self.device)
+#         else:
+#             videos, labels = batch
+#             videos = videos.to(self.device)
+#             labels = [label.to(self.device) for label in labels]
+#             sean_labels = labels[0]
+#             santiago_labels = labels[0] if self.single_grader else labels[1]
 
-                # self.scaler.unscale_(self.optimizer)
-                # torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
-                # self.scaler.step(self.optimizer)
-                # self.scaler.update()
-                # self.optimizer.zero_grad()
-                # if self.scheduler:
-                #     self.scheduler.step()
+#         with torch.no_grad():
+#             with autocast(enabled=self.use_amp):
+#                 outputs = self.model(videos)
+#                 if self.hierarchical_mode:
+#                     base_preds = torch.argmax(outputs[0], dim=1)
+#                     subclass_preds = torch.argmax(outputs[1], dim=1)
+#                     preds = (base_preds, subclass_preds)
+#                 else:
+#                     preds = torch.argmax(outputs, dim=1)
 
-                    # self.scaler.step(self.optimizer)
-                    # self.scaler.update()
-                    # self.optimizer.zero_grad()
+#                 attention_maps = None
+#                 if self.save_attention:
+#                     attention_maps = self.model.get_attention_maps(videos)
+
+#         if self.hierarchical_mode:
+#             return outputs, preds, (base_labels, subclass_labels), attention_maps
+#         else:
+#             return outputs, preds, (sean_labels, santiago_labels), attention_maps
+
+#     def evaluate(self):
+#         self.model.eval()
+#         all_outputs = []
+#         all_preds = []
+#         all_labels = []
+
+#         for batch_idx, batch in enumerate(self.eval_loader):
+#             outputs, preds, labels, attention_maps = self.process_batch(batch, batch_idx)
+
+#             if self.hierarchical_mode:
+#                 base_outputs, subclass_outputs = outputs
+#                 base_preds, subclass_preds = preds
+#                 base_labels, subclass_labels = labels
+#                 all_outputs.append((base_outputs.detach().cpu(), subclass_outputs.detach().cpu()))
+#                 all_preds.append((base_preds.detach().cpu(), subclass_preds.detach().cpu()))
+#                 all_labels.append((base_labels.detach().cpu(), subclass_labels.detach().cpu()))
+#             else:
+#                 all_outputs.append(outputs.detach().cpu())
+#                 all_preds.append(preds.detach().cpu())
+#                 all_labels.append((labels[0].detach().cpu(), labels[1].detach().cpu()))
+
+#             if self.save_attention and attention_maps is not None and GPUSetup.is_main_process():
+#                 save_attention_maps(
+#                     attention_maps=attention_maps,
+#                     video_paths=[f"batch_{batch_idx}_sample_{i}" for i in range(len(batch[0]))],
+#                     save_dir=os.path.join(self.model_save_path, 'attention_maps'),
+#                     run_id=self.run_id,
+#                     batch_idx=batch_idx
+#                 )
+
+#             if batch_idx % 10 == 0:
+#                 log_info(f"Evaluation Batch {batch_idx}")
+
+#         if self.hierarchical_mode:
+#             all_base_outputs = torch.cat([x[0] for x in all_outputs])
+#             all_subclass_outputs = torch.cat([x[1] for x in all_outputs])
+#             all_outputs = (all_base_outputs, all_subclass_outputs)
+#             all_base_preds = torch.cat([x[0] for x in all_preds])
+#             all_subclass_preds = torch.cat([x[1] for x in all_preds])
+#             all_preds = (all_base_preds, all_subclass_preds)
+#             all_base_labels = torch.cat([x[0] for x in all_labels])
+#             all_subclass_labels = torch.cat([x[1] for x in all_labels])
+#             all_labels = (all_base_labels, all_subclass_labels)
+#         else:
+#             all_outputs = torch.cat(all_outputs)
+#             all_preds = torch.cat(all_preds)
+#             all_sean_labels = torch.cat([x[0] for x in all_labels])
+#             all_santiago_labels = torch.cat([x[1] for x in all_labels])
+#             all_labels = (all_sean_labels, all_santiago_labels)
+
+#         metrics = {}
+#         if self.hierarchical_mode:
+#             base_metrics = compute_metrics(all_base_labels, all_base_preds, self.cfg['training']['num_base_classes'])
+#             subclass_metrics = compute_metrics(all_subclass_labels, all_subclass_preds, self.cfg['training']['num_subclasses'])
+#             metrics.update({
+#                 'base_accuracy': base_metrics['accuracy'],
+#                 'base_f1': base_metrics['f1_per_class'],
+#                 'base_precision': base_metrics['precision'],
+#                 'base_recall': base_metrics['recall'],
+#                 'subclass_accuracy': subclass_metrics['accuracy'],
+#                 'subclass_f1': subclass_metrics['f1_per_class'],
+#                 'subclass_precision': subclass_metrics['precision'],
+#                 'subclass_recall': subclass_metrics['recall']
+#             })
+#         else:
+#             sean_metrics = compute_metrics(all_sean_labels, all_preds, self.cfg['training']['num_classes'])
+#             metrics.update({
+#                 'sean_accuracy': sean_metrics['accuracy'],
+#                 'sean_f1': sean_metrics['f1_per_class'],
+#                 'sean_precision': sean_metrics['precision'],
+#                 'sean_recall': sean_metrics['recall']
+#             })
+#             if not self.single_grader:
+#                 santiago_metrics = compute_metrics(all_santiago_labels, all_preds, self.cfg['training']['num_classes'])
+#                 metrics.update({
+#                     'santiago_accuracy': santiago_metrics['accuracy'],
+#                     'santiago_f1': santiago_metrics['f1_per_class'],
+#                     'santiago_precision': santiago_metrics['precision'],
+#                     'santiago_recall': santiago_metrics['recall']
+#                 })
+
+#         if GPUSetup.is_distributed():
+#             metrics_tensor = torch.tensor([metrics[k] for k in sorted(metrics.keys()) if isinstance(metrics[k], (int, float))],
+#                                          dtype=torch.float32, device=self.device)
+#             torch.distributed.all_reduce(metrics_tensor, op=torch.distributed.ReduceOp.SUM)
+#             metrics_tensor /= GPUSetup.get_world_size()
+#             for idx, key in enumerate(sorted(metrics.keys())):
+#                 if isinstance(metrics[key], (int, float)):
+#                     metrics[key] = metrics_tensor[idx].item()
+
+#         if GPUSetup.is_main_process():
+#             if self.cfg['output_configuration'].get('use_wandb'):
+#                 wandb_log({f"eval_{k}": v for k, v in metrics.items() if isinstance(v, (int, float))})
+#             self.post_evaluation_actions(metrics, all_labels, all_preds)
+
+#         return metrics
+
+#     def post_evaluation_actions(self, metrics, true_labels, pred_labels):
+#         if not GPUSetup.is_main_process():
+#             return
+#         if self.hierarchical_mode:
+#             all_base_labels, all_subclass_labels = true_labels
+#             all_base_preds, all_subclass_preds = pred_labels
+#             pred_labels = [f"{BASE_CLASSES[base.item()]}{SUBCLASSES[subclass.item()]}" if SUBCLASSES[subclass.item()] else BASE_CLASSES[base.item()]
+#                            for base, subclass in zip(all_base_preds, all_subclass_preds)]
+#             true_labels = [f"{BASE_CLASSES[base.item()]}{SUBCLASSES[subclass.item()]}" if SUBCLASSES[subclass.item()] else BASE_CLASSES[base.item()]
+#                            for base, subclass in zip(all_base_labels, all_subclass_labels)]
+#             plot_confusion_matrix(
+#                 metrics={'true_labels': np.array(true_labels), 'pred_labels': np.array(pred_labels)},
+#                 model_save_path=self.model_save_path,
+#                 run_id=self.run_id
+#             )
+#         else:
+#             all_sean_labels, all_santiago_labels = true_labels
+#             plot_confusion_matrix(
+#                 metrics={'true_labels': all_sean_labels.numpy(), 'pred_labels': pred_labels.numpy()},
+#                 model_save_path=self.model_save_path,
+#                 run_id=self.run_id,
+#                 title="Confusion Matrix (Sean_Review)"
+#             )
+#             if not self.single_grader:
+#                 plot_confusion_matrix(
+#                     metrics={'true_labels': all_santiago_labels.numpy(), 'pred_labels': pred_labels.numpy()},
+#                     model_save_path=self.model_save_path,
+#                     run_id=self.run_id,
+#                     title="Confusion Matrix (Santiago_Review)"
+#                 )
+
+# # ---------------------------------------------------------------------------- #
+

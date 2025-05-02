@@ -12,7 +12,7 @@ paths:
 output_configuration:
   work_dir: work_dir/runs
   task_name: vls_grading
-  use_wandb: false
+  use_wandb: true #false
   checkpoint_interval: 5
   logging_level: INFO
 
@@ -28,7 +28,7 @@ training:
   num_workers: 1 #4
   lr: 0.0001
   ssl_lr: 0.001
-  epochs: 5 #50
+  epochs: 50
   ssl_epochs: 20
   ssl_pretrain: false
 

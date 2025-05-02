@@ -12,7 +12,7 @@ paths:
 output_configuration:
   work_dir: work_dir/runs
   task_name: vls_grading
-  use_wandb: true #
+  use_wandb: false #true #
   checkpoint_interval: 5
   logging_level: INFO
 
