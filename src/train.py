@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 from datetime import datetime
 
-from utils import GPUSetup, load_config #, setup_logger,determine_run_directory, get_project_root
+from utils import GPUSetup, load_config 
 from dataset import MultiGraderDataset, PretrainingDataset
 from model import get_model
 from engine import TrainingEngine, PretrainingEngine
@@ -27,7 +27,6 @@ def train(cfg, run_path):
     local_rank = int(os.environ.get('LOCAL_RANK', 0))
     device = torch.device(f"cuda:{local_rank}") if torch.cuda.is_available() else torch.device('cpu')
     logger.info(f"Local Rank {local_rank}: using device {device} - Starting training setup procedure")
-    # logger.info(f"Local Rank {local_rank}: Starting training setup procedure")
 
     if GPUSetup.is_distributed() and rank % ngpus_per_node == 0:
         print("Before DDP initialization:", flush=True)
@@ -72,14 +71,6 @@ def train(cfg, run_path):
         )
 
         # Initialize model for pretraining
-        # model = get_model(
-        #     cfg['training']['model_name'],
-        #     num_base_classes=cfg['training']['num_base_classes'],
-        #     num_subclasses=0,
-        #     pretrained=True,
-        #     pretrain_method=pretrain_method,
-        # )
-
         base_args = dict(
             model_name     = cfg['training']['model_name'],
             num_base_classes = cfg['training']['num_base_classes'],
@@ -87,16 +78,15 @@ def train(cfg, run_path):
             pretrained     = True,
             pretrain_method= pretrain_method,
         )
-
-        # for MAE only, pull patch_size & mask_ratio from cfg
+        # for MAE only
         if pretrain_method == 'mae':
             base_args.update(
                 patch_size = cfg['training']['patch_size'],
                 mask_ratio = cfg['training']['mask_ratio'],
+                end_mask_ratio = cfg['training']['end_mask_ratio'],
             )
 
         model = get_model(**base_args)
-
         model = model.to(device)
 
         if GPUSetup.is_distributed():
@@ -108,7 +98,6 @@ def train(cfg, run_path):
                 broadcast_buffers=True,
                 find_unused_parameters=True
             )
-
         torch.backends.cudnn.benchmark = True
 
         # Set up pretraining engine
@@ -122,7 +111,6 @@ def train(cfg, run_path):
         if GPUSetup.is_main_process():
             checkpoint_path = os.path.join(run_path, cfg['paths']['checkpoint_dir'], 'ssl_pretrained.pth')
             torch.save(model.module.state_dict() if GPUSetup.is_distributed() else model.state_dict(), checkpoint_path)
-        # logger.info("Pretraining completed")
 
         # free up any cached GPU memory before we start fine-tuning
         if torch.cuda.is_available():
@@ -175,8 +163,6 @@ def train(cfg, run_path):
     # Load pretrained weights if available
     if cfg['training']['ssl_pretrain']:
         checkpoint_path = os.path.join(run_path, cfg['paths']['checkpoint_dir'], 'ssl_pretrained.pth')
-        # state = torch.load(checkpoint_path, map_location=device)
-        # model.load_state_dict(state)
         state = torch.load(checkpoint_path, map_location=device)
         missing, unexpected = model.load_state_dict(state, strict=False)
         print("Missing head keys (to be randomly init'ed):", missing)
@@ -246,6 +232,16 @@ if __name__ == "__main__":
         GPUSetup.cleanup()
 
 
+
+
+
+        # model = get_model(
+        #     cfg['training']['model_name'],
+        #     num_base_classes=cfg['training']['num_base_classes'],
+        #     num_subclasses=0,
+        #     pretrained=True,
+        #     pretrain_method=pretrain_method,
+        # )
 
 
     # # -------------------- SETUP EXPERIMENT RUN -------------------- #

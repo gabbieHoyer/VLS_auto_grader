@@ -174,9 +174,20 @@ class TrainingEngine:
 
         return total_loss / batch_count, metrics
 
-    def validate(self):
+    def validate(self, epoch):
         if self.val_loader is None:
             return 0, {}, None, None, None, None
+        
+        if GPUSetup.is_main_process() and epoch == self.start_epoch:
+            plot_augmentations(
+                loader=self.val_loader,
+                run_path=self.model_save_path,
+                fig_dir=self.cfg['paths']['figures_dir'],
+                run_id=self.run_id,
+                prefix='val',
+                n_frames=8,
+                save_path=self.model_save_path
+            )
 
         self.model.eval()
         total_loss = 0
@@ -290,12 +301,13 @@ class TrainingEngine:
 
         if GPUSetup.is_main_process():
             plot_augmentations(
-                self.train_loader,
-                self.model_save_path,
-                self.cfg['paths']['figures_dir'],
-                self.run_id,
+                loader=self.train_loader,
+                run_path=self.model_save_path,
+                fig_dir=self.cfg['paths']['figures_dir'],
+                run_id=self.run_id,
                 prefix='train',
-                n_frames=4
+                n_frames=8,
+                save_path=self.model_save_path
             )
 
         for epoch in range(self.start_epoch, epochs):
@@ -303,7 +315,7 @@ class TrainingEngine:
                 self.train_loader.sampler.set_epoch(epoch)
 
             train_loss, train_metrics = self.train_epoch(epoch)
-            val_loss, val_metrics, val_base_preds, val_base_labels, val_subclass_preds, val_subclass_labels = self.validate()
+            val_loss, val_metrics, val_base_preds, val_base_labels, val_subclass_preds, val_subclass_labels = self.validate(epoch)
 
             if val_base_preds is not None and val_base_labels is not None:
                 latest_val_base_preds, latest_val_base_labels = val_base_preds, val_base_labels
@@ -391,7 +403,6 @@ class PretrainingEngine:
         self.pretrain_loader = pretrain_loader
         self.dataset = pretrain_loader.dataset  # Store reference to dataset
         self.cfg = cfg
-        # self.run_path = run_path
         self.device = device
         self.pretrain_method = pretrain_method
         self.start_epoch = start_epoch
@@ -524,22 +535,51 @@ class PretrainingEngine:
 
         if GPUSetup.is_main_process():
             plot_pretrain_augmentations(
-                self.pretrain_loader,
-                self.model_save_path,
-                self.cfg['paths']['figures_dir'],
-                self.run_id,
+                loader=self.pretrain_loader,
+                run_path=self.model_save_path,
+                fig_dir=self.cfg['paths']['figures_dir'],
+                run_id=self.run_id,
                 pretrain_method=self.pretrain_method,
-                n_frames=4
+                n_frames=8,
+                save_path=self.model_save_path
             )
 
         for epoch in range(self.start_epoch, epochs):
             # Set the epoch on the dataset for curriculum learning (e.g., MAE mask ratio)
+            # Set the epoch on the dataset for all pretraining methods
             self.dataset.set_epoch(epoch)
 
+            # Update mask_ratio for MAE
+            current_mask_ratio = None  # For WandB logging
+            if self.pretrain_method == 'mae':
+                mask_ratio = self.dataset.mask_ratio
+                end_mask_ratio = self.dataset.end_mask_ratio
+                total_epochs = self.dataset.total_epochs
+
+                # Validate total_epochs to prevent division by zero
+                if total_epochs <= 1:
+                    raise ValueError(f"total_epochs must be > 1, got {total_epochs}")
+
+                progress = epoch / (total_epochs - 1)
+                current_mask_ratio = mask_ratio + (end_mask_ratio - mask_ratio) * progress
+
+                # Clamp mask_ratio to [0, 1]
+                current_mask_ratio = max(0.0, min(1.0, current_mask_ratio))
+
+                # self.dataset.set_epoch(epoch)
+
+                model = self.model.module if hasattr(self.model, 'module') else self.model
+                model.set_mask_ratio(current_mask_ratio)
+                
+                if GPUSetup.is_main_process():
+                    logger.info(f"Epoch {epoch}: mask_ratio={current_mask_ratio:.3f}")
+                
+            # Set epoch for distributed sampler
             if GPUSetup.is_distributed() and hasattr(self.pretrain_loader.sampler, 'set_epoch'):
                 self.pretrain_loader.sampler.set_epoch(epoch)
 
             train_loss = self.train_epoch(epoch)
+
             # one scheduler step per epoch
             if self.scheduler:
                 self.scheduler.step()
@@ -551,6 +591,7 @@ class PretrainingEngine:
                 if self.cfg['output_configuration'].get('use_wandb'):
                     wandb_log({
                         'train_loss': train_loss,
+                        'mask_ratio': current_mask_ratio if self.pretrain_method == 'mae' else None,
                     })
 
                 if epoch % self.cfg['output_configuration']['checkpoint_interval'] == 0:

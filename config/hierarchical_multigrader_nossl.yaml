@@ -25,7 +25,7 @@ training:
   num_subclasses: 5
   num_classes: 8
   batch_size: 8
-  num_workers: 4
+  num_workers: 1 #4
   lr: 0.0001
   ssl_lr: 0.001
   epochs: 5 #50

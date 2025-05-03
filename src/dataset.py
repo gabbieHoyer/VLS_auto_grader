@@ -158,6 +158,11 @@ class MultiGraderDataset(Dataset):
                     return video, [torch.tensor(sean_label), torch.tensor(santiago_label)]
 
 
+import logging
+from utils import GPUSetup
+logger = logging.getLogger(__name__)
+
+
 class PretrainingDataset(Dataset):
     def __init__(self, base_dataset, pretrain_method, cfg, ssl_transform=None):
         """
@@ -175,17 +180,39 @@ class PretrainingDataset(Dataset):
         self.cfg = cfg
 
         # MAE-specific parameters
-        self.mask_ratio = cfg.get('training', {}).get('mask_ratio', 0.5)  # Start with 50%
-        self.end_mask_ratio = cfg.get('training', {}).get('end_mask_ratio', 0.75)  # End at 75%
+        self.mask_ratio = cfg.get('training', {}).get('mask_ratio', 0.5)
+        self.end_mask_ratio = cfg.get('training', {}).get('end_mask_ratio', 0.75)
         self.patch_size = cfg.get('training', {}).get('patch_size', 16)
-        self.temporal_consistency = cfg.get('training', {}).get('temporal_consistency', 'full')  # 'full', 'partial', or 'none'
+        self.temporal_consistency = cfg.get('training', {}).get('temporal_consistency', 'full')
         self.change_interval = cfg.get('training', {}).get('change_interval', 5)
         self.total_epochs = cfg.get('training', {}).get('ssl_epochs', 100)
-        self.current_epoch = 0  # Track current epoch for curriculum learning
+        self.current_epoch = 0
+        self.current_mask_ratio = self.mask_ratio  # Initialize with initial mask_ratio
+
+        # Validate MAE parameters
+        if self.pretrain_method == 'mae':
+            if not (0 <= self.mask_ratio <= 1):
+                raise ValueError(f"mask_ratio must be in [0, 1], got {self.mask_ratio}")
+            if not (0 <= self.end_mask_ratio <= 1):
+                raise ValueError(f"end_mask_ratio must be in [0, 1], got {self.end_mask_ratio}")
+            if not isinstance(self.patch_size, int) or self.patch_size <= 0:
+                raise ValueError(f"patch_size must be a positive integer, got {self.patch_size}")
+            if self.total_epochs <= 0:
+                raise ValueError(f"total_epochs must be positive, got {self.total_epochs}")
+            if not isinstance(self.change_interval, int) or self.change_interval <= 0:
+                raise ValueError(f"change_interval must be a positive integer, got {self.change_interval}")
+            if self.temporal_consistency not in ['full', 'partial', 'none']:
+                raise ValueError(f"temporal_consistency must be 'full', 'partial', or 'none', got {self.temporal_consistency}")
 
     def set_epoch(self, epoch):
-        """Set the current epoch for curriculum learning."""
+        """Set the current epoch and update current_mask_ratio for curriculum learning."""
         self.current_epoch = epoch
+        if self.pretrain_method == 'mae':
+            progress = min(self.current_epoch / (self.total_epochs - 1), 1.0) if self.total_epochs > 1 else 0.0
+            self.current_mask_ratio = self.mask_ratio + progress * (self.end_mask_ratio - self.mask_ratio)
+            self.current_mask_ratio = max(0.0, min(1.0, self.current_mask_ratio))
+            if GPUSetup.is_main_process():
+                logger.info(f"Dataset: Set epoch {epoch}, current_mask_ratio={self.current_mask_ratio:.3f}")
 
     def __len__(self):
         return len(self.base_dataset)
@@ -202,17 +229,26 @@ class PretrainingDataset(Dataset):
 
             # 2) reshape to [C, T, H, W] for masking
             orig = aug_clip.permute(1, 0, 2, 3)
+            logger.debug(f"Video shape after permute: {orig.shape}")
 
             # 3) apply your masking core
+            # masked, mask, midxs, total = apply_masking(
+            #     orig,
+            #     mask_ratio=self.mask_ratio,
+            #     patch_size=self.patch_size,
+            #     temporal_consistency=self.temporal_consistency,
+            #     change_interval=self.change_interval,
+            #     current_epoch=self.current_epoch,
+            #     total_epochs=self.total_epochs,
+            #     end_mask_ratio=self.end_mask_ratio
+            # )
+
             masked, mask, midxs, total = apply_masking(
                 orig,
-                mask_ratio=self.mask_ratio,
+                mask_ratio=self.current_mask_ratio,  # Use precomputed value
                 patch_size=self.patch_size,
                 temporal_consistency=self.temporal_consistency,
                 change_interval=self.change_interval,
-                current_epoch=self.current_epoch,
-                total_epochs=self.total_epochs,
-                end_mask_ratio=self.end_mask_ratio
             )
             return {
                 'masked_video':    masked,   # [C,T,H,W]
@@ -234,6 +270,109 @@ class PretrainingDataset(Dataset):
         
         else:
             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
+
+
+
+
+# from torch.nn.functional import pad
+# aug_clip = self.transform(video)
+# orig = aug_clip.permute(1, 0, 2, 3)
+# # Pad to nearest multiple of patch_size
+# pad_h = (patch_size - orig.size(2) % patch_size) % patch_size
+# pad_w = (patch_size - orig.size(3) % patch_size) % patch_size
+# orig = pad(orig, (0, pad_w, 0, pad_h))
+# # Update H, W for masking
+# H, W = orig.size(2), orig.size(3)
+# masked, mask, midxs, total = apply_masking(
+#     orig,
+#     mask_ratio=self.current_mask_ratio,
+#     patch_size=self.patch_size,
+#     temporal_consistency=self.temporal_consistency,
+#     change_interval=self.change_interval,
+# )
+# # Crop back if padded
+# masked = masked[:, :, :T, :orig.size(2)-pad_h, :orig.size(3)-pad_w] if pad_h or pad_w else masked
+# mask = mask[:T, :orig.size(2)-pad_h, :orig.size(3)-pad_w] if pad_h or pad_w else mask
+
+
+
+
+# class PretrainingDataset(Dataset):
+#     def __init__(self, base_dataset, pretrain_method, cfg, ssl_transform=None):
+#         """
+#         Dataset for pretraining methods like contrastive learning or masked autoencoders.
+
+#         Args:
+#             base_dataset (Dataset): Base dataset (e.g., MultiGraderDataset) providing raw video data.
+#             pretrain_method (str): Pretraining method ('contrastive', 'moco', 'mae').
+#             cfg (dict): Configuration dictionary.
+#             ssl_transform (callable, optional): Transform function for SSL pretraining.
+#         """
+#         self.base_dataset = base_dataset
+#         self.pretrain_method = pretrain_method
+#         self.transform = ssl_transform  # Use provided transform
+#         self.cfg = cfg
+
+#         # MAE-specific parameters
+#         self.mask_ratio = cfg.get('training', {}).get('mask_ratio', 0.5)  # Start with 50%
+#         self.end_mask_ratio = cfg.get('training', {}).get('end_mask_ratio', 0.75)  # End at 75%
+#         self.patch_size = cfg.get('training', {}).get('patch_size', 16)
+#         self.temporal_consistency = cfg.get('training', {}).get('temporal_consistency', 'full')  # 'full', 'partial', or 'none'
+#         self.change_interval = cfg.get('training', {}).get('change_interval', 5)
+#         self.total_epochs = cfg.get('training', {}).get('ssl_epochs', 100)
+#         self.current_epoch = 0  # Track current epoch for curriculum learning
+
+#     def set_epoch(self, epoch):
+#         """Set the current epoch for curriculum learning."""
+#         self.current_epoch = epoch
+
+#     def __len__(self):
+#         return len(self.base_dataset)
+
+#     def __getitem__(self, idx):
+#         # Get raw video from base dataset (no transform applied yet)
+#         video, _ = self.base_dataset[idx]  # Ignore labels, video shape: [T, C, H, W]
+        
+#         # full temporal consistency:
+#         if self.pretrain_method == 'mae':
+#             # 1) apply the same augment to every frame
+#             #    transform_fn returns a Tensor [T, C, H, W]
+#             aug_clip = self.transform(video)
+
+#             # 2) reshape to [C, T, H, W] for masking
+#             orig = aug_clip.permute(1, 0, 2, 3)
+
+#             # 3) apply your masking core
+#             masked, mask, midxs, total = apply_masking(
+#                 orig,
+#                 mask_ratio=self.mask_ratio,
+#                 patch_size=self.patch_size,
+#                 temporal_consistency=self.temporal_consistency,
+#                 change_interval=self.change_interval,
+#                 current_epoch=self.current_epoch,
+#                 total_epochs=self.total_epochs,
+#                 end_mask_ratio=self.end_mask_ratio
+#             )
+#             return {
+#                 'masked_video':    masked,   # [C,T,H,W]
+#                 'original_video':  orig,
+#                 'mask':            mask,
+#                 'mask_indices':    midxs,
+#                 'total_patches':   total
+#             }
+#         # temporal consistency:
+#         elif self.pretrain_method in ['contrastive', 'moco']:
+#             # Apply transform to the entire video stack directly
+#             # print(f"Debug: video shape before transform={video.shape}")
+#             video1 = self.transform(video)  # [T, C, H, W]
+#             # print(f"Debug: video1 shape after transform={video1.shape}")
+#             video2 = self.transform(video)  # [T, C, H, W]
+#             video1 = video1.permute(1, 0, 2, 3)  # [C, T, H, W]
+#             video2 = video2.permute(1, 0, 2, 3)  # [C, T, H, W]
+#             return {'video1': video1, 'video2': video2}
+        
+#         else:
+#             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
 
 
 

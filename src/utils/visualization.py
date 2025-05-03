@@ -63,7 +63,7 @@ def plot_augmentations(loader,
     if save_path:
         out_dir = os.path.join(run_path, fig_dir)
         os.makedirs(out_dir, exist_ok=True)
-        out_path = save_path if save_path else os.path.join(out_dir, f'{prefix}_augment_{run_id}.png')
+        out_path = os.path.join(out_dir, f'{prefix}_augment_{run_id}.png')
         fig.savefig(out_path, bbox_inches='tight')
 
     if close_fig:
@@ -136,8 +136,7 @@ def plot_pretrain_augmentations(loader,
         out_dir = os.path.join(run_path, fig_dir)
         os.makedirs(out_dir, exist_ok=True)
         fname = f"pretrain_augment_{pretrain_method}_{run_id}.png"
-        out_path = save_path if save_path else os.path.join(out_dir, fname)
-        fig.savefig(out_path, bbox_inches='tight')
+        fig.savefig(os.path.join(out_dir, fname), bbox_inches='tight')
 
     if close_fig:
         plt.close(fig)
