@@ -1,7 +1,7 @@
-# src/utils/experiment_setup.py
+# src/utils/paths.py
 import os
-from . import GPUSetup
 import torch
+from . import GPUSetup
 
 def generate_group_name(cfg):
     """
@@ -109,33 +109,3 @@ def initialize_experiment(cfg):
 
     return run_path
 
-
-
-# def generate_group_name(cfg):
-#     """Generate a dynamic group name based on config settings."""
-#     ssl_pretrain = cfg['training']['ssl_pretrain']
-#     model_name = cfg['training']['model_name']
-#     return f"{model_name}_ssl_{'pretrain' if ssl_pretrain else 'supervised'}"
-
-# def generate_group_name(cfg):
-#     """
-#     Hybrid group-name generator:
-#     1) If the user has set experiment.name in the config, use that verbatim.
-#     2) Otherwise build one from model, hierarchy, graders, and SSL flags.
-#     """
-#     # 1) fallback to explicit experiment.name
-#     exp_name = cfg.get('experiment', {}).get('name')
-#     if exp_name:
-#         return exp_name
-
-#     # 2) dynamic construction
-#     model = cfg['training']['model_name']
-#     ssl   = 'pretrain' if cfg['training']['ssl_pretrain'] else 'supervised'
-
-#     label_cols = cfg['training']['datamodule'].get('label_cols', [])
-#     grade      = 'multigrader'  if len(label_cols) > 1 else 'singlegrader'
-
-#     num_subs   = cfg['training'].get('num_subclasses', 0)
-#     hier       = 'hierarchical'    if num_subs > 0 else 'nonhierarchical'
-
-#     return f"{model}_{hier}_{grade}_{ssl}"

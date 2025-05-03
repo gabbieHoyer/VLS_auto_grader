@@ -1,8 +1,7 @@
-
-# src/metrics.py
-from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
+# src/models/metrics.py
 import torch
 import numpy as np
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 
 def compute_metrics(true_labels, pred_labels, num_classes):
     """
@@ -109,36 +108,3 @@ def parse_label(label):
 
 
 # --------------------------------------------
-
-
-# # src/metrics.py
-# from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
-# import torch
-
-# def compute_metrics(true_labels, pred_labels, num_classes):
-#     """
-#     Compute classification metrics for true and predicted labels.
-
-#     Args:
-#         true_labels (torch.Tensor): True labels (shape: [N]).
-#         pred_labels (torch.Tensor): Predicted labels (shape: [N]).
-#         num_classes (int): Number of classes.
-
-#     Returns:
-#         dict: Dictionary of metrics (accuracy, f1, precision, recall).
-#     """
-#     true_labels = true_labels.numpy()
-#     pred_labels = pred_labels.numpy()
-    
-#     metrics = {
-#         'accuracy': accuracy_score(true_labels, pred_labels),
-#         'f1_score': f1_score(true_labels, pred_labels, average='weighted'),
-#         'precision': precision_score(true_labels, pred_labels, average='weighted'),
-#         'recall': recall_score(true_labels, pred_labels, average='weighted')
-#     }
-    
-#     return metrics
-
-
-# ---------------------------------------
-

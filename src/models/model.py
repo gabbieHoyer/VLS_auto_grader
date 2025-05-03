@@ -1,3 +1,4 @@
+# src/models/model.py
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -5,7 +6,7 @@ import torchvision.models.video as video_models
 from collections import deque
 import logging
 
-from utils.ssl_helpers import patchify, unpatchify
+from src.ssl import unpatchify
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -216,208 +217,6 @@ class I3D(nn.Module):
         return feat
 
 
-
-    # def forward(self, x, x2=None, mask_indices=None):
-    #     if self.pretrain_method == 'mae':
-    #         # x: [B, 3, T, H, W]  -> torch.Size([8, 3, 16, 224, 224])
-
-    #         import pdb; pdb.set_trace()
-    #         B = x.size(0)
-
-    #         _, _, T, H, W = x.shape  # Derive dimensions from input
-    #         self.T = T
-    #         self.frame_size = H  # Update frame_size dynamically
-    #         self.num_patches_per_frame = (H // self.patch_size) ** 2
-    #         self.total_patches = T * self.num_patches_per_frame
-    #         self.patch_dim = 3 * self.patch_size * self.patch_size
-
-    #         feat = self.model(x)  # [B, in_features]
-    #         out = self.decoder(feat)  # [B, patch_dim]
-
-    #         # Dynamically set num_masked based on mask_indices
-    #         num_masked = mask_indices.size(1) if mask_indices.dim() > 1 else mask_indices.size(0)
-    #         out = out.view(B, 1, self.patch_dim).repeat(1, num_masked, 1)  # [B, num_masked, patch_dim]
-
-    #         # feat = self.model(x)  # [B, in_features]
-    #         # # Decoder outputs per patch, reshape dynamically based on num_masked
-    #         # out = self.decoder(feat)  # [B, patch_dim]
-    #         # out = out.view(B, 1, self.patch_dim).repeat(1, self.num_masked, 1)  # [B, num_masked, patch_dim]
-
-    #         # Scatter into full patch grid
-    #         device, dtype = out.device, out.dtype
-    #         full = torch.zeros(
-    #             (B, self.total_patches, self.patch_dim),
-    #             device=device, dtype=dtype
-    #         )
-    #         if mask_indices.dim() == 1:
-    #             mask_indices = mask_indices.unsqueeze(0).expand(B, -1)
-    #         for i in range(B):
-    #             full[i, mask_indices[i]] = out[i]
-
-    #         video = unpatchify(full, self.patch_size, self.T, self.frame_size, self.frame_size)
-    #         return video
-
-
-# class I3D(nn.Module):
-#     def __init__(
-#         self,
-#         num_base_classes: int,
-#         num_subclasses:   int    = 0,
-#         pretrained:       bool   = True,
-#         pretrain_method:  str|None = None,
-#         patch_size:       int    = 16,
-#         mask_ratio:       float  = 0.75,
-#         # num_base_classes,
-#         # num_subclasses=0,
-#         # pretrained=True,
-#         # pretrain_method=None,
-#         # patch_size=16,
-#         # mask_ratio=0.75,
-#     ):
-#         super().__init__()
-#         self.model = video_models.r3d_18(pretrained=pretrained)
-#         self.in_features = self.model.fc.in_features
-#         self.pretrain_method = pretrain_method.lower() if pretrain_method else None
-#         self.hierarchical = num_subclasses > 0
-
-#         logger.info(f"Initializing I3D with pretrain_method: {self.pretrain_method}")
-
-#         # Disable in-place ReLUs in backbone
-#         for m in self.model.modules():
-#             if isinstance(m, nn.ReLU):
-#                 m.inplace = False
-
-#         # Remove final fc for SSL modes
-#         if self.pretrain_method in ('contrastive', 'moco', 'mae'):
-#             self.model.fc = nn.Identity()
-
-#         if pretrain_method == 'mae':
-#             # could pull from cfg in future:
-#             self.frame_size = 224
-#             self.patch_size = patch_size
-#             # could pull from cfg in future - parametrize T (number of frames):
-#             self.T = 16
-#             self.num_patches_per_frame = (self.frame_size // patch_size) ** 2
-#             self.total_patches = self.T * self.num_patches_per_frame
-#             self.mask_ratio = mask_ratio       
-#             self.num_masked = int(self.mask_ratio * self.total_patches)
-#             self.patch_dim = 3 * patch_size * patch_size
-
-#             self.decoder = nn.Sequential(
-#                 nn.Linear(self.in_features, 512),
-#                 nn.ReLU(inplace=False),
-#                 nn.Linear(512, self.num_masked * self.patch_dim),
-#             )
-
-#         # common projection head (used by contrastive & MoCo)
-#         self.projection_head = nn.Sequential(
-#             nn.Linear(self.in_features, 512),
-#             nn.ReLU(),
-#             nn.Linear(512, 128),
-#         )
-
-#         # MoCo momentum encoder & queue
-#         if self.pretrain_method == 'moco':
-#             self.momentum_encoder = video_models.r3d_18(pretrained=pretrained)
-#             self.momentum_encoder.fc = nn.Identity()
-#             # freeze momentum parameters
-#             for p in self.momentum_encoder.parameters():
-#                 p.requires_grad = False
-#             # projection head for keys
-#             self.momentum_projection_head = nn.Sequential(
-#                 nn.Linear(self.in_features, 512),
-#                 nn.ReLU(),
-#                 nn.Linear(512, 128),
-#             )
-#             self.momentum = 0.999
-#             self.queue_size = 4096
-#             self.register_buffer('queue', torch.randn(self.queue_size, 128))  # placeholder
-#             self.register_buffer('queue_ptr', torch.zeros(1, dtype=torch.long))
-
-#         # supervised classification heads
-#         if self.pretrain_method not in ('contrastive', 'moco', 'mae'):
-#             if self.hierarchical:
-#                 self.model.fc = nn.Identity()
-#                 self.base_head = nn.Linear(self.in_features, num_base_classes)
-#                 self.subclass_head = nn.Linear(self.in_features, num_subclasses)
-#             else:
-#                 self.model.fc = nn.Linear(self.in_features, num_base_classes)
-#                 logger.info(
-#                     f"Set supervised fc to Linear({self.in_features}, {num_base_classes})"
-#                 )
-
-#     def _update_momentum_encoder(self):
-#         # Momentum update: key_encoder = m * key_encoder + (1-m) * query_encoder
-#         for param_q, param_k in zip(self.model.parameters(), self.momentum_encoder.parameters()):
-#             param_k.data = param_k.data * self.momentum + param_q.data * (1.0 - self.momentum)
-#         for qh, kh in zip(self.projection_head.parameters(), self.momentum_projection_head.parameters()):
-#             kh.data = kh.data * self.momentum + qh.data * (1.0 - self.momentum)
-
-#     def _enqueue_and_dequeue(self, keys):
-#         # keys: [B, 128]
-#         batch_size = keys.size(0)
-#         ptr = int(self.queue_ptr)
-#         # replace the oldest entries
-#         if ptr + batch_size <= self.queue_size:
-#             self.queue[ptr:ptr+batch_size] = keys.detach()
-#         else:
-#             # wrap-around
-#             end = self.queue_size - ptr
-#             self.queue[ptr:] = keys[:end].detach()
-#             self.queue[: batch_size - end] = keys[end:].detach()
-#         self.queue_ptr[0] = (ptr + batch_size) % self.queue_size
-
-#     def forward(self, x, x2=None, mask_indices=None):
-#         # x: [B, 3, T, H, W]
-#         if self.pretrain_method == 'mae':
-#             B = x.size(0)
-#             feat = self.model(x)                              # [B, in_features]
-#             out  = self.decoder(feat)                         # [B, num_masked*patch_dim]
-#             out  = out.view(B, self.num_masked, self.patch_dim)
-
-#             # Scatter into full patch grid:
-#             device, dtype = out.device, out.dtype
-#             full = torch.zeros(
-#                 (B, self.total_patches, self.patch_dim),
-#                 device=device, dtype=dtype
-#             )
-#             if mask_indices.dim() == 1:
-#                 mask_indices = mask_indices.unsqueeze(0).expand(B, -1)
-#             for i in range(B):
-#                 full[i, mask_indices[i]] = out[i]
-
-#             # Only unpatchify is needed here:
-#             video = unpatchify(full, self.patch_size, self.T, self.frame_size, self.frame_size)
-#             # use the *full* frame height & width (224), not patch_size
-#             # video = unpatchify(full, self.patch_size, self.T, 224, 224)
-#             return video
-
-
-#         if self.pretrain_method == 'contrastive':
-#             # require two views
-#             assert x2 is not None, "Contrastive mode needs both x and x2"
-#             q = self.projection_head(self.model(x))   # queries
-#             k = self.projection_head(self.model(x2))  # keys for contrastive loss
-#             return q, k
-
-#         if self.pretrain_method == 'moco':
-#             # query
-#             q = self.projection_head(self.model(x))
-#             # update key encoder and build key
-#             with torch.no_grad():
-#                 self._update_momentum_encoder()
-#                 k = self.momentum_projection_head(self.momentum_encoder(x))
-#             # enqueue & dequeue
-#             self._enqueue_and_dequeue(k)
-#             return q, k
-
-#         # supervised forward
-#         feat = self.model(x)
-#         if self.hierarchical:
-#             return self.base_head(feat), self.subclass_head(feat)
-#         return feat
-
-
 class ViViT(nn.Module):
     def __init__(self, num_base_classes, num_subclasses=0, pretrained=True, pretrain_method=None):
         super(ViViT, self).__init__()
@@ -598,7 +397,6 @@ class ViViT(nn.Module):
         return attn_maps
 
 
-
 def get_model(
     model_name: str,
     num_base_classes: int,
@@ -644,28 +442,3 @@ def get_model(
         )
     else:
         raise ValueError(f"Unknown model: {model_name}")
-
-
-# def get_model(model_name, num_base_classes, num_subclasses=0, pretrained=True, pretrain_method=None):
-#     """
-#     Initialize and return a model based on the specified name.
-
-#     Args:
-#         model_name (str): Name of the model ('i3d' or 'vivit').
-#         num_base_classes (int): Number of base classes (e.g., 8 for single-grader, 4 for hierarchical).
-#         num_subclasses (int): Number of subclasses (0 for single-grader, 5 for hierarchical).
-#         pretrained (bool): Whether to load pretrained weights (for I3D or ViViT backbone).
-#         pretrain_method (str, optional): Pretraining method ('contrastive', 'moco', 'mae') or None for supervised.
-
-#     Returns:
-#         nn.Module: Initialized model.
-#     """
-#     if model_name == 'i3d':
-#         return I3D(num_base_classes, num_subclasses, pretrained, pretrain_method)
-#     elif model_name == 'vivit':
-#         return ViViT(num_base_classes, num_subclasses, pretrained, pretrain_method)
-#     else:
-#         raise ValueError(f"Unknown model: {model_name}")
-    
-
-# ---------------------------------------------------------------------------- #

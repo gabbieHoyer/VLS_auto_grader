@@ -1,17 +1,16 @@
-### eval.py
+# src/training/eval.py
 import os
 import argparse
 import logging
-import torch
-from torch.utils.data import DataLoader, DistributedSampler
 import pandas as pd
 
-from utils import GPUSetup, load_config
-from dataset import MultiGraderDataset
-from model import get_model
-from utils.augmentations import get_transforms
-from engine import EvalEngine
+import torch
+from torch.utils.data import DataLoader, DistributedSampler
 
+from src.utils import GPUSetup, load_config
+from src.data import MultiGraderDataset, get_transforms
+from src.models.model import get_model
+from src.training.engine import EvalEngine
 
 def main(config_file):
     # load config and setup logging
@@ -97,6 +96,8 @@ if __name__ == '__main__':
     args = parser.parse_args()
     main(args.config_file)
 
+
+    # config_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'config', args.config_file)
 
 
 

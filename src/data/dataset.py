@@ -1,10 +1,14 @@
+# src/data/dataset.py
+import cv2
+import logging
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import cv2
-import numpy as np
-import albumentations as A
-from utils.augmentations import get_ssl_transforms
-from utils.ssl_helpers import apply_masking
+
+from src.utils import GPUSetup
+from src.ssl import apply_masking
+
+logger = logging.getLogger(__name__)
 
 class MultiGraderDataset(Dataset):
     def __init__(self, video_paths, labels, transform=None, is_ssl=False, num_frames=16, hierarchical=False):
@@ -134,8 +138,10 @@ class MultiGraderDataset(Dataset):
             return video, labels  # Return raw video and labels for PretrainingDataset to handle
         else:
             if self.transform:
-                video = torch.stack([self.transform(frame) for frame in video])
-                video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
+                # video = torch.stack([self.transform(frame) for frame in video])
+                # video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
+                video = self.transform(video)      # [T,C,H,W]
+                video = video.permute(1,0,2,3)     # [C,T,H,W]
 
             if self.hierarchical:
                 if self.single_grader:
@@ -156,11 +162,6 @@ class MultiGraderDataset(Dataset):
                     sean_label = self.map_label(labels[0])
                     santiago_label = self.map_label(labels[1])
                     return video, [torch.tensor(sean_label), torch.tensor(santiago_label)]
-
-
-import logging
-from utils import GPUSetup
-logger = logging.getLogger(__name__)
 
 
 class PretrainingDataset(Dataset):
@@ -232,17 +233,6 @@ class PretrainingDataset(Dataset):
             logger.debug(f"Video shape after permute: {orig.shape}")
 
             # 3) apply your masking core
-            # masked, mask, midxs, total = apply_masking(
-            #     orig,
-            #     mask_ratio=self.mask_ratio,
-            #     patch_size=self.patch_size,
-            #     temporal_consistency=self.temporal_consistency,
-            #     change_interval=self.change_interval,
-            #     current_epoch=self.current_epoch,
-            #     total_epochs=self.total_epochs,
-            #     end_mask_ratio=self.end_mask_ratio
-            # )
-
             masked, mask, midxs, total = apply_masking(
                 orig,
                 mask_ratio=self.current_mask_ratio,  # Use precomputed value
@@ -272,211 +262,3 @@ class PretrainingDataset(Dataset):
             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
 
 
-
-
-# from torch.nn.functional import pad
-# aug_clip = self.transform(video)
-# orig = aug_clip.permute(1, 0, 2, 3)
-# # Pad to nearest multiple of patch_size
-# pad_h = (patch_size - orig.size(2) % patch_size) % patch_size
-# pad_w = (patch_size - orig.size(3) % patch_size) % patch_size
-# orig = pad(orig, (0, pad_w, 0, pad_h))
-# # Update H, W for masking
-# H, W = orig.size(2), orig.size(3)
-# masked, mask, midxs, total = apply_masking(
-#     orig,
-#     mask_ratio=self.current_mask_ratio,
-#     patch_size=self.patch_size,
-#     temporal_consistency=self.temporal_consistency,
-#     change_interval=self.change_interval,
-# )
-# # Crop back if padded
-# masked = masked[:, :, :T, :orig.size(2)-pad_h, :orig.size(3)-pad_w] if pad_h or pad_w else masked
-# mask = mask[:T, :orig.size(2)-pad_h, :orig.size(3)-pad_w] if pad_h or pad_w else mask
-
-
-
-
-# class PretrainingDataset(Dataset):
-#     def __init__(self, base_dataset, pretrain_method, cfg, ssl_transform=None):
-#         """
-#         Dataset for pretraining methods like contrastive learning or masked autoencoders.
-
-#         Args:
-#             base_dataset (Dataset): Base dataset (e.g., MultiGraderDataset) providing raw video data.
-#             pretrain_method (str): Pretraining method ('contrastive', 'moco', 'mae').
-#             cfg (dict): Configuration dictionary.
-#             ssl_transform (callable, optional): Transform function for SSL pretraining.
-#         """
-#         self.base_dataset = base_dataset
-#         self.pretrain_method = pretrain_method
-#         self.transform = ssl_transform  # Use provided transform
-#         self.cfg = cfg
-
-#         # MAE-specific parameters
-#         self.mask_ratio = cfg.get('training', {}).get('mask_ratio', 0.5)  # Start with 50%
-#         self.end_mask_ratio = cfg.get('training', {}).get('end_mask_ratio', 0.75)  # End at 75%
-#         self.patch_size = cfg.get('training', {}).get('patch_size', 16)
-#         self.temporal_consistency = cfg.get('training', {}).get('temporal_consistency', 'full')  # 'full', 'partial', or 'none'
-#         self.change_interval = cfg.get('training', {}).get('change_interval', 5)
-#         self.total_epochs = cfg.get('training', {}).get('ssl_epochs', 100)
-#         self.current_epoch = 0  # Track current epoch for curriculum learning
-
-#     def set_epoch(self, epoch):
-#         """Set the current epoch for curriculum learning."""
-#         self.current_epoch = epoch
-
-#     def __len__(self):
-#         return len(self.base_dataset)
-
-#     def __getitem__(self, idx):
-#         # Get raw video from base dataset (no transform applied yet)
-#         video, _ = self.base_dataset[idx]  # Ignore labels, video shape: [T, C, H, W]
-        
-#         # full temporal consistency:
-#         if self.pretrain_method == 'mae':
-#             # 1) apply the same augment to every frame
-#             #    transform_fn returns a Tensor [T, C, H, W]
-#             aug_clip = self.transform(video)
-
-#             # 2) reshape to [C, T, H, W] for masking
-#             orig = aug_clip.permute(1, 0, 2, 3)
-
-#             # 3) apply your masking core
-#             masked, mask, midxs, total = apply_masking(
-#                 orig,
-#                 mask_ratio=self.mask_ratio,
-#                 patch_size=self.patch_size,
-#                 temporal_consistency=self.temporal_consistency,
-#                 change_interval=self.change_interval,
-#                 current_epoch=self.current_epoch,
-#                 total_epochs=self.total_epochs,
-#                 end_mask_ratio=self.end_mask_ratio
-#             )
-#             return {
-#                 'masked_video':    masked,   # [C,T,H,W]
-#                 'original_video':  orig,
-#                 'mask':            mask,
-#                 'mask_indices':    midxs,
-#                 'total_patches':   total
-#             }
-#         # temporal consistency:
-#         elif self.pretrain_method in ['contrastive', 'moco']:
-#             # Apply transform to the entire video stack directly
-#             # print(f"Debug: video shape before transform={video.shape}")
-#             video1 = self.transform(video)  # [T, C, H, W]
-#             # print(f"Debug: video1 shape after transform={video1.shape}")
-#             video2 = self.transform(video)  # [T, C, H, W]
-#             video1 = video1.permute(1, 0, 2, 3)  # [C, T, H, W]
-#             video2 = video2.permute(1, 0, 2, 3)  # [C, T, H, W]
-#             return {'video1': video1, 'video2': video2}
-        
-#         else:
-#             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
-
-
-
-        # if self.pretrain_method == 'mae':
-        #     # Unroll video tensor along time dimension and transform each frame
-        #     frames = [video[i] for i in range(video.size(0))]  # List of [C, H, W] tensors
-        #     orig = torch.stack([self.transform(f) for f in frames]).permute(1, 0, 2, 3)  # [C, T, H, W]
-        #     masked, mask, midxs, total = apply_masking(
-        #         orig,
-        #         mask_ratio=self.mask_ratio,
-        #         patch_size=self.patch_size,
-        #         temporal_consistency=self.temporal_consistency,
-        #         change_interval=self.change_interval,
-        #         current_epoch=self.current_epoch,
-        #         total_epochs=self.total_epochs,
-        #         end_mask_ratio=self.end_mask_ratio
-        #     )
-        #     return {
-        #         'masked_video': masked,
-        #         'original_video': orig,
-        #         'mask': mask,
-        #         'mask_indices': midxs,
-        #         'total_patches': total
-        #     }
-
-        # not temporal consistency:
-        # elif self.pretrain_method in ['contrastive', 'moco']:
-        #     # Apply transforms to create two augmented views
-        #     video1 = torch.stack([self.transform(frame) for frame in video])
-        #     video2 = torch.stack([self.transform(frame) for frame in video])
-        #     video1 = video1.permute(1, 0, 2, 3)  # [C, T, H, W]
-        #     video2 = video2.permute(1, 0, 2, 3)  # [C, T, H, W]
-        #     return {'video1': video1, 'video2': video2}
-
-        # Not temporal consistency:
-        # if self.pretrain_method == 'mae':
-        #     # Apply transforms to each frame and stack: [T, C, H, W] -> [C, T, H, W]
-        #     orig = torch.stack([self.transform(f) for f in video]).permute(1, 0, 2, 3)
-        #     # Apply masking with temporal consistency and curriculum learning
-        #     masked, mask, midxs, total = apply_masking(
-        #         orig,
-        #         mask_ratio=self.mask_ratio,
-        #         patch_size=self.patch_size,
-        #         temporal_consistency=self.temporal_consistency,
-        #         change_interval=self.change_interval,
-        #         current_epoch=self.current_epoch,
-        #         total_epochs=self.total_epochs,
-        #         end_mask_ratio=self.end_mask_ratio
-        #     )
-        #     return {
-        #         'masked_video':   masked,     # [C, T, H, W]
-        #         'original_video': orig,       # [C, T, H, W]
-        #         'mask':           mask,       # [T, H, W]
-        #         'mask_indices':   midxs,      # [num_masked]
-        #         'total_patches':  total       # int
-        #     }
-
-# --------------------
-
-
-# class PretrainingDataset(Dataset):
-#     def __init__(self, base_dataset, pretrain_method, cfg, ssl_transform=None):
-#         """
-#         Dataset for pretraining methods like contrastive learning or masked autoencoders.
-
-#         Args:
-#             base_dataset (Dataset): Base dataset (e.g., MultiGraderDataset) providing raw video data.
-#             pretrain_method (str): Pretraining method ('contrastive', 'moco', 'mae').
-#             cfg (dict): Configuration dictionary.
-#             ssl_transform (callable, optional): Transform function for SSL pretraining.
-#         """
-#         self.base_dataset = base_dataset
-#         self.pretrain_method = pretrain_method
-#         self.transform = ssl_transform  # Use provided transform
-#         self.mask_ratio = cfg.get('training', {}).get('mask_ratio', 0.75)  # Default mask ratio for MAE
-
-#     def __len__(self):
-#         return len(self.base_dataset)
-
-#     def __getitem__(self, idx):
-#         # Get raw video from base dataset (no transform applied yet)
-#         video, _ = self.base_dataset[idx]  # Ignore labels, video shape: [T, C, H, W]
-
-#         if self.pretrain_method == 'mae':
-#             # transforms → [C,T,H,W]
-#             orig = torch.stack([self.transform(f) for f in video]).permute(1,0,2,3)
-#             masked, mask, midxs, total = apply_masking(orig, self.mask_ratio, patch_size=16)
-#             return {
-#                 'masked_video':   masked,     # [C,T,H,W]
-#                 'original_video': orig,       # [C,T,H,W]
-#                 'mask':           mask,       # [T,H,W]
-#                 'mask_indices':   midxs,      # [num_masked]
-#                 'total_patches':  total       # int
-#             }
-        
-#         elif self.pretrain_method in ['contrastive', 'moco']:
-#             # Apply transforms to create two augmented views
-#             video1 = torch.stack([self.transform(frame) for frame in video])
-#             video2 = torch.stack([self.transform(frame) for frame in video])
-#             video1 = video1.permute(1, 0, 2, 3)  # [C, T, H, W]
-#             video2 = video2.permute(1, 0, 2, 3)  # [C, T, H, W]
-#             return {'video1': video1, 'video2': video2}
-        
-#         else:
-#             raise ValueError(f"Unknown pretrain_method: {self.pretrain_method}")
-
-# ---------------------------------------------------------------------------- #

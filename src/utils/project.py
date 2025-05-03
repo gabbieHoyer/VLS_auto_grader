@@ -1,4 +1,4 @@
-# src/utils/experiment_setup.py
+# src/utils/project.py
 import os
 import pyrootutils
 

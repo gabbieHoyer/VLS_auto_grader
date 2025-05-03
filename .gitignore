@@ -18,10 +18,10 @@ logs/
 *.log
 
 # Machine learning outputs and model files (avoid including heavy files)
-data/
+/data/
 outputs/
 inference_outputs/
-models/
+/models/
 checkpoints/
 *.onnx
 wandb/
@@ -37,6 +37,9 @@ src/dev/
 src/__pycache__/
 src/*.pyc
 src/*.pyo
+
+notebooks/fix_video_splits.py
+notebooks/analyze_sean_review.py
 
 # Operating system generated files
 .DS_Store
