@@ -11,7 +11,7 @@ from src.ssl import apply_masking
 logger = logging.getLogger(__name__)
 
 class MultiGraderDataset(Dataset):
-    def __init__(self, video_paths, labels, transform=None, is_ssl=False, num_frames=16, hierarchical=False):
+    def __init__(self, video_paths, labels, transform=None, is_ssl=False, num_frames=16, hierarchical=False, simplified_base=False):
         """
         Dataset for 3D video classification with single/multi-grader support.
 
@@ -29,8 +29,11 @@ class MultiGraderDataset(Dataset):
         self.transform = transform
         self.is_ssl = is_ssl
         self.num_frames = num_frames
-        self.hierarchical = hierarchical
+        self.simplified_base = simplified_base
+        # self.hierarchical = hierarchical
+        self.hierarchical    = False if simplified_base else hierarchical
 
+        # import pdb; pdb.set_trace()
         # Determine if single-grader mode
         self.single_grader = len(labels[0]) == 1 if labels else False
 
@@ -44,12 +47,34 @@ class MultiGraderDataset(Dataset):
             4: ['a', 'b', 'c', 'd']  # '4a', '4b', '4c', '4d'
         }
         # For non-hierarchical mode
-        self.class_names = ['1', '2', '2b', '2c', '3', '3b', '3c', '4b']
+        # self.class_names = ['1', '2', '2b', '2c', '3', '3b', '3c', '4b']
+        # self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
+        # self.subclasses_inverse = {v: k for k, v in self.subclasses.items()}  # For reverse mapping
+
+        # ─── adjust label maps for simplified vs full ───
+        if self.simplified_base:
+            # only keep base classes '1','2','3','4'
+            self.class_names = [str(i) for i in range(1, len(self.base_classes)+1)]
+        else:
+            # original 8-class set
+            self.class_names = ['1','2','2b','2c','3','3b','3c','4b']
+
+        # rebuild mappings from whichever class_names is active
         self.class_to_idx = {name: idx for idx, name in enumerate(self.class_names)}
-        self.subclasses_inverse = {v: k for k, v in self.subclasses.items()}  # For reverse mapping
+        self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
+
 
         if self.hierarchical:
             self.initialize_valid_subclasses()
+
+        # non-hierarchical: map idx→string
+        # self.idx_to_class = {idx: name for idx, name in enumerate(self.class_names)}
+
+        # hierarchical: base idx→string, subclass idx→string
+        # base_labels are 0..3 for ['1','2','3','4']
+        self.idx_to_base = {i: str(i+1) for i in range(len(self.base_classes))}
+        # subclass_labels are 0..4 for ['a','b','c','d','none']
+        self.idx_to_subclass = {v: k for k, v in self.subclasses.items()}
 
     def initialize_valid_subclasses(self):
         observed_subclasses = {1: set(), 2: set(), 3: set(), 4: set()}
@@ -138,10 +163,20 @@ class MultiGraderDataset(Dataset):
             return video, labels  # Return raw video and labels for PretrainingDataset to handle
         else:
             if self.transform:
-                # video = torch.stack([self.transform(frame) for frame in video])
-                # video = video.permute(1, 0, 2, 3)  # [C, T, H, W]
                 video = self.transform(video)      # [T,C,H,W]
                 video = video.permute(1,0,2,3)     # [C,T,H,W]
+
+            # ── simplified base-only mode ──
+            if self.simplified_base:
+                # parse numeric base and subtract 1 for zero-based
+                base1, _ = self.parse_label(labels[0])
+                idx1     = base1 - 1
+                if self.single_grader:
+                    return video, [torch.tensor(idx1), torch.tensor(idx1)]
+                else:
+                    base2, _ = self.parse_label(labels[1])
+                    idx2     = base2 - 1
+                    return video, [torch.tensor(idx1), torch.tensor(idx2)]
 
             if self.hierarchical:
                 if self.single_grader:
@@ -155,6 +190,7 @@ class MultiGraderDataset(Dataset):
                     'valid_subclasses': torch.tensor(valid_subclasses)
                 }
             else:
+                # Non-hierarchical mode - works well for both single and multi-grader
                 if self.single_grader:
                     label = self.map_label(labels[0])
                     return video, [torch.tensor(label), torch.tensor(label)]

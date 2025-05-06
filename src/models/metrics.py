@@ -108,3 +108,50 @@ def parse_label(label):
 
 
 # --------------------------------------------
+
+def flatten_metrics(prefix: str, metrics: dict, out: dict):
+    """
+    Given a metrics dict like {'sean_accuracy':0.8, 'sean_f1':tensor([0.7,0.6,0.9])},
+    write into `out` keys like 'train_sean_accuracy' and
+    'train_sean_f1_class_0', 'train_sean_f1_class_1', …
+    """
+    for name, value in metrics.items():
+        # convert torch.Tensor to numpy or float
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu().numpy()
+        # array-like: unroll per class
+        if hasattr(value, '__len__') and not isinstance(value, (str, bytes)):
+            for i, v in enumerate(value):
+                out[f'{prefix}_{name}_class_{i}'] = float(v)
+        else:
+            # single number
+            out[f'{prefix}_{name}'] = float(value)
+
+
+# def flatten_with_names(self, prefix, metrics, out_dict):
+#         """
+#         Like flatten_metrics, but replaces 'class_{i}' with real label names.
+#         """
+#         for name, value in metrics.items():
+#             # pull numpy array or scalar
+#             if isinstance(value, torch.Tensor):
+#                 arr = value.detach().cpu().numpy()
+#             else:
+#                 arr = value
+
+#             # array-like → unroll per index
+#             if hasattr(arr, "__len__") and not isinstance(arr, (str, bytes)):
+#                 for i, v in enumerate(arr):
+#                     # pick the right map
+#                     if name in ("sean_f1", "santiago_f1"):
+#                         label = self.idx_to_class.get(i, f"class_{i}")
+#                     elif name == "base_f1":
+#                         label = self.idx_to_base.get(i, f"{i+1}")
+#                     elif name == "subclass_f1":
+#                         label = self.idx_to_subclass.get(i, f"sub{i}")
+#                     else:
+#                         label = f"class_{i}"
+#                     out_dict[f"{prefix}_{name}_{label}"] = float(v)
+#             else:
+#                 # scalar
+#                 out_dict[f"{prefix}_{name}"] = float(arr)

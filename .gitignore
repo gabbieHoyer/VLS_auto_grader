@@ -38,6 +38,20 @@ src/__pycache__/
 src/*.pyc
 src/*.pyo
 
+# ----------------------------
+src/training/engine2.py
+src/training/train2.py
+src/training/engine_copy.py
+src/training/train_copy.py
+
+src/models/model2.py
+src/models/model_copy.py
+
+src/data/dataset2.py
+src/data/dataset_copy.py
+src/data/augmentations2.py
+
+# ----------------------------
 notebooks/fix_video_splits.py
 notebooks/analyze_sean_review.py
 

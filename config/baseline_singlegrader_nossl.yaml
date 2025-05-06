@@ -1,6 +1,6 @@
 experiment:
-  name: VLS_3D_Grading_NonHierarchical_SingleGrader_NoSSL
-  description: "Non-hierarchical single-grader training without SSL pretraining."
+  name: VLS_3D_Grading_Simplified_Classes_SingleGrader_NoSSL
+  description: "Hierarchical single-grader training without SSL pretraining."
 
 paths:
   data_csv: data/video_splits_corrected.csv
@@ -12,22 +12,24 @@ paths:
 output_configuration:
   work_dir: work_dir/runs
   task_name: vls_grading
-  use_wandb: true #false
+  use_wandb: false #true #false
   checkpoint_interval: 5
   logging_level: INFO
 
 training:
   datamodule:
     video_col: 'Processed_video_path'
-    label_cols: ['Sean_Review']
+    label_cols: ['Sean_Review']  # Only one grader
   model_name: 'i3d'
-  num_base_classes: 8
-  num_subclasses: 0
+  num_base_classes: 4
+  num_subclasses: 5
   num_classes: 8
+  simplified_base: true #false   # ← set true to train on base-only
   batch_size: 32 #24 #16
   num_workers: 1 #4
   lr: 0.00001 #0.0001 #0.00005 #0.0001
-  epochs: 50
+  epochs: 5 #50
+  subclass_loss_weight: 0.5
 
   ssl_lr: 0.001
   ssl_epochs: 20

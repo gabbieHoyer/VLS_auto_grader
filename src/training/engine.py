@@ -10,10 +10,10 @@ from src.utils import (
     GPUSetup, log_info, wandb_log, 
     log_and_checkpoint, final_checkpoint_conversion,
     plot_confusion_matrix, plot_loss_curves, save_attention_maps,
-    plot_augmentations, plot_pretrain_augmentations,
+    plot_augmentations, plot_pretrain_augmentations, plot_qc_predictions,
     init_wandb_run,
 )
-from src.models import compute_metrics
+from src.models import compute_metrics, flatten_metrics
 from src.ssl import SimCLRContrastiveLoss, MoCoLoss, ReconstructionLoss
 
 logger = logging.getLogger(__name__)
@@ -46,6 +46,11 @@ class TrainingEngine:
         self.hierarchical_mode = self._check_hierarchical_mode()
         self.single_grader = self._check_single_grader()
 
+        ds = self.train_loader.dataset
+        self.idx_to_class    = getattr(ds, 'idx_to_class', None)
+        self.idx_to_base     = getattr(ds, 'idx_to_base', None)
+        self.idx_to_subclass = getattr(ds, 'idx_to_subclass', None)
+
         self.run_id = run_id
         self.model_save_path = run_path
 
@@ -57,6 +62,34 @@ class TrainingEngine:
                 stage='finetune',
                 tags=['train', cfg['experiment']['name'], 'supervised']
             )
+
+    def _flatten_with_names(self, prefix, metrics, out_dict):
+            """
+            Like flatten_metrics, but replaces 'class_{i}' with real label names.
+            """
+            for name, value in metrics.items():
+                # pull numpy array or scalar
+                if isinstance(value, torch.Tensor):
+                    arr = value.detach().cpu().numpy()
+                else:
+                    arr = value
+
+                # array-like → unroll per index
+                if hasattr(arr, "__len__") and not isinstance(arr, (str, bytes)):
+                    for i, v in enumerate(arr):
+                        # pick the right map
+                        if name in ("sean_f1", "santiago_f1"):
+                            label = self.idx_to_class.get(i, f"class_{i}")
+                        elif name == "base_f1":
+                            label = self.idx_to_base.get(i, f"{i+1}")
+                        elif name == "subclass_f1":
+                            label = self.idx_to_subclass.get(i, f"sub{i}")
+                        else:
+                            label = f"class_{i}"
+                        out_dict[f"{prefix}_{name}_{label}"] = float(v)
+                else:
+                    # scalar
+                    out_dict[f"{prefix}_{name}"] = float(arr)
 
     def _check_hierarchical_mode(self):
         if self.train_loader is None:
@@ -98,10 +131,27 @@ class TrainingEngine:
                 videos = videos.to(self.device)
                 labels = [label.to(self.device) for label in labels]
                 sean_labels = labels[0]
+
+                # for the very first batch, do QC *before* any autocast/grad activity
+                if batch_idx == 0 and epoch == self.start_epoch:
+                    with torch.no_grad():
+                        plot_qc_predictions(
+                            loader     = self.val_loader,
+                            model      = self.model,
+                            device     = self.device,
+                            run_path   = self.model_save_path,
+                            fig_dir    = self.cfg['paths']['figures_dir'],
+                            run_id     = self.run_id,
+                            prefix     = 'val_qc',
+                            n_samples  = 4,
+                            n_frames   = 8
+                      )
+
                 with autocast(enabled=self.use_amp):
                     outputs = self.model(videos)
                     loss = self.criterion(outputs, sean_labels)
                     preds = torch.argmax(outputs, dim=1)
+
                     all_base_preds.append(preds.cpu())
                     all_base_labels.append(sean_labels.cpu())
                     if not self.single_grader:
@@ -116,9 +166,6 @@ class TrainingEngine:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
-                # self.optimizer.zero_grad()
-                # if self.scheduler:
-                #     self.scheduler.step()
                 self.optimizer.zero_grad()
 
             total_loss += loss.item() * self.grad_accum
@@ -251,6 +298,8 @@ class TrainingEngine:
         if self.hierarchical_mode:
             base_metrics = compute_metrics(all_base_labels, all_base_preds, self.cfg['training']['num_base_classes'])
             subclass_metrics = compute_metrics(all_subclass_labels, all_subclass_preds, self.cfg['training']['num_subclasses'])
+            
+            # still should have sean vs santiago splits in hierarchical mode = true******************
             metrics = {
                 'base_accuracy': base_metrics['accuracy'],
                 'base_f1': base_metrics['f1_per_class'],
@@ -322,9 +371,16 @@ class TrainingEngine:
                 latest_val_base_preds, latest_val_base_labels = val_base_preds, val_base_labels
                 latest_val_subclass_preds, latest_val_subclass_labels = val_subclass_preds, val_subclass_labels
 
-            # step scheduler once per epoch (after train_epoch)
+            # ---- step the scheduler based on its type ----
             if self.scheduler is not None:
-                self.scheduler.step()
+                # get the scheduler class name
+                sched_name = self.scheduler.__class__.__name__
+                if sched_name == 'ReduceLROnPlateau':
+                    # pass in the metric you’re watching
+                    self.scheduler.step(val_loss)
+                else:
+                    # e.g. CosineAnnealingLR or StepLR
+                    self.scheduler.step()
 
             if GPUSetup.is_main_process():
                 log_info(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
@@ -334,12 +390,16 @@ class TrainingEngine:
                 losses['val'].append({'epoch': epoch, 'loss': val_loss})
 
                 if self.cfg['output_configuration'].get('use_wandb'):
-                    wandb_log({
-                        'train_loss': train_loss,
-                        'val_loss': val_loss,
-                        **{f"train_{k}": v for k, v in train_metrics.items()},
-                        **{f"val_{k}": v for k, v in val_metrics.items()}
-                    })
+                    log_dict = {
+                            'train_loss': train_loss,
+                            'val_loss':   val_loss,
+                            'lr':         self.optimizer.param_groups[0]['lr']
+                    }
+                    # this will inject keys like train_sean_f1_2b etc.
+                    self._flatten_with_names('train', train_metrics, log_dict)
+                    self._flatten_with_names('val',   val_metrics,   log_dict)
+
+                    wandb_log(log_dict, step=epoch)
 
                 if epoch % self.cfg['output_configuration']['checkpoint_interval'] == 0:
                     log_and_checkpoint(self.model, self.optimizer, self.scheduler, epoch, val_metrics.get('base_accuracy', val_metrics.get('sean_accuracy', 0)), self.model_save_path, self.run_id)
@@ -512,8 +572,6 @@ class PretrainingEngine:
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.clip_grad)
             self.scaler.step(self.optimizer)
             self.scaler.update()
-            # if self.scheduler:
-            #     self.scheduler.step()
             self.optimizer.zero_grad()
 
             # log peak‐memory for the final partial step
@@ -566,8 +624,6 @@ class PretrainingEngine:
 
                 # Clamp mask_ratio to [0, 1]
                 current_mask_ratio = max(0.0, min(1.0, current_mask_ratio))
-
-                # self.dataset.set_epoch(epoch)
 
                 model = self.model.module if hasattr(self.model, 'module') else self.model
                 model.set_mask_ratio(current_mask_ratio)
@@ -638,11 +694,14 @@ class EvalEngine:
         self.use_wandb = cfg['output_configuration'].get('use_wandb', False)
         if self.use_wandb and GPUSetup.is_main_process():
             from utils.wandb_utils import init_wandb_run
-            self.wandb = init_wandb_run(
-                cfg, datetime.now().strftime("%Y%m%d-%H%M"),
-                stage='eval',
-                tags=['eval', cfg['experiment']['name']]
-            )
+
+            # have option where the run_id is passed direclty from previous training vs if this was separate time completely and need to load in that info once more
+            # metadata = load_run_metadata(run_folder)
+            # self.wandb = init_wandb_run(
+            #     cfg, metadata['run_id'],
+            #     stage='eval',
+            #     tags=['eval', cfg['experiment']['name']]
+            # )
 
     def evaluate(self):
         self.model.eval()
@@ -725,3 +784,24 @@ class EvalEngine:
 
 # -------------------------------------------------------------------------------- #
 # -------------------------------------------------------------------------------- #
+
+            # if GPUSetup.is_main_process():
+            #     log_info(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            #     log_info(f"Train Metrics: {train_metrics}")
+            #     log_info(f"Val Metrics: {val_metrics}")
+            #     losses['train'].append({'epoch': epoch, 'loss': train_loss})
+            #     losses['val'].append({'epoch': epoch, 'loss': val_loss})
+
+            #     if self.cfg['output_configuration'].get('use_wandb'):
+            #         log_dict = {
+            #                 'train_loss': train_loss,
+            #                 'val_loss':   val_loss,
+            #         }
+            #         flatten_metrics('train', train_metrics, log_dict)
+            #         flatten_metrics('val',   val_metrics,   log_dict)
+
+            #         # now add the learning rate
+            #         current_lr = self.optimizer.param_groups[0]['lr']
+            #         log_dict['lr'] = current_lr
+
+            #         wandb_log(log_dict, step=epoch)

@@ -6,7 +6,10 @@
 
 # Re-export specific classes and functions from models
 from .model import get_model
-from .metrics import compute_metrics
+
+from .model2 import get_model2
+
+from .metrics import compute_metrics, flatten_metrics
 
 # Define __all__ for controlled imports
 __all__ = [
@@ -18,5 +21,7 @@ __all__ = [
 
     # Functions
     "get_model",
+    "get_model2",
     "compute_metrics",
+    "flatten_metrics"
 ]

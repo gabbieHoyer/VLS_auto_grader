@@ -34,12 +34,20 @@ def train(cfg, run_path):
         print("Before DDP initialization:", flush=True)
         os.system("nvidia-smi")
 
+    simplified = cfg['training'].get('simplified_base', False)
+    # if simplified, ignore subclasses and metrics collapse to base-only
+    if simplified:
+        # force flat mode
+        cfg['training']['num_subclasses'] = 0
+        cfg['training']['num_classes'] = cfg['training']['num_base_classes']
+
     # -------------------- LOAD DATA -------------------- #
     df = pd.read_csv(cfg['paths']['data_csv'])
     train_df = df[df['split'] == 'train']
     val_df = df[df['split'] == 'val']
-    hierarchical = cfg['training']['num_subclasses'] > 0
-    
+    # hierarchical = cfg['training']['num_subclasses'] > 0
+    hierarchical = (cfg['training']['num_subclasses'] > 0) and not simplified
+        
     # -------------------- PRETRAINING -------------------- #
     run_id = datetime.now().strftime("%Y%m%d-%H%M")
     if cfg['training']['ssl_pretrain']:
@@ -128,13 +136,15 @@ def train(cfg, run_path):
         video_paths=train_df[cfg['training']['datamodule']['video_col']].tolist(),
         labels=train_df[cfg['training']['datamodule']['label_cols']].values.tolist(),
         transform=train_transforms,
-        hierarchical=hierarchical
+        hierarchical=hierarchical,
+        simplified_base=simplified
     )
     val_dataset = MultiGraderDataset(
         video_paths=val_df[cfg['training']['datamodule']['video_col']].tolist(),
         labels=val_df[cfg['training']['datamodule']['label_cols']].values.tolist(),
         transform=val_transforms,
-        hierarchical=hierarchical
+        hierarchical=hierarchical,
+        simplified_base=simplified
     )
 
     train_sampler = DistributedSampler(train_dataset) if GPUSetup.is_distributed() else None
@@ -156,7 +166,7 @@ def train(cfg, run_path):
     model = get_model(
         cfg['training']['model_name'],
         num_base_classes=cfg['training']['num_base_classes'],
-        num_subclasses=cfg['training']['num_subclasses'],
+        num_subclasses=cfg['training']['num_subclasses'],     # will be 0 if simplified
         pretrained=True,
         pretrain_method=None
     )
@@ -181,19 +191,24 @@ def train(cfg, run_path):
         )
         torch.backends.cudnn.benchmark = True
 
-    # Define criterion, optimizer, scheduler
+    # Update criterion with increased label smoothing
+    weight_decay = cfg['training']['optimizer']['weight_decay']
+    label_smoothing = cfg['training']['loss']['label_smoothing']
     if hierarchical:
-        base_criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
-        subclass_criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+        base_criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
+        subclass_criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
         criterion = lambda outputs, batch: (
             base_criterion(outputs[0], batch['base_label'].to(device)) +
             cfg['training']['subclass_loss_weight'] * subclass_criterion(outputs[1], batch['subclass_label'].to(device))
         )
     else:
-        criterion = torch.nn.CrossEntropyLoss(label_smoothing=0.1)
+        criterion = torch.nn.CrossEntropyLoss(label_smoothing=label_smoothing)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['training']['lr'], weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['training']['epochs'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg['training']['lr'], weight_decay=weight_decay)
+
+    # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg['training']['epochs'])
+    # Use ReduceLROnPlateau scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
     engine = TrainingEngine(
         model, optimizer, scheduler, criterion, train_loader, val_loader, cfg, run_id, run_path, device

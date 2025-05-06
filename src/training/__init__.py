@@ -8,6 +8,8 @@
 # Re-export specific classes and functions from models
 from .engine import TrainingEngine, PretrainingEngine, EvalEngine
 
+from .engine2 import TrainingEngine2, PretrainingEngine2, EvalEngine2
+
 # Define __all__ for controlled imports
 __all__ = [
     # Modules
@@ -19,6 +21,11 @@ __all__ = [
     "TrainingEngine",
     "PretrainingEngine",
     "EvalEngine",
+
+    "TrainingEngine2",
+    "PretrainingEngine2",
+    "EvalEngine2",
+
 
     # Functions
     # "get_model",

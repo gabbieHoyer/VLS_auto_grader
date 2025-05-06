@@ -41,7 +41,7 @@ from .config_loader import load_config
 from .checkpointing import log_and_checkpoint, final_checkpoint_conversion
 
 # Re-export specific functions from visualization
-from .visualization import plot_confusion_matrix, plot_loss_curves, save_attention_maps, plot_augmentations, plot_pretrain_augmentations
+from .visualization import plot_confusion_matrix, plot_loss_curves, save_attention_maps, plot_augmentations, plot_pretrain_augmentations, plot_qc_predictions
 
 from .wandb_utils import init_wandb_run
 
@@ -82,6 +82,7 @@ __all__ = [
     "save_attention_maps",
     "plot_augmentations",
     "plot_pretrain_augmentations",
+    "plot_qc_predictions",
     "init_wandb_run",
 ]
 

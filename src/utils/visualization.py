@@ -21,6 +21,124 @@ def _denormalize(vid):
     return np.clip(vid, 0, 1)
 
 
+def plot_qc_predictions(loader, model, device, run_path, fig_dir, run_id,
+                        prefix='qc', n_samples=4, n_frames=8, close_fig=True):
+
+    # grab the dataset’s mapping from index → class-string
+    ds         = loader.dataset
+    idx_to_cls = ds.idx_to_class      # flat mode: {0:'1',1:'2',2:'3',3:'4'}
+
+    model.eval()
+    batch = next(iter(loader))
+
+    # unpack videos + true indices exactly as before…
+    if isinstance(batch, dict):
+        vids, trues = batch['video'], batch['base_label']
+    else:
+        vids, lbls  = batch
+        vids, trues = vids, lbls[0]
+
+    vids   = vids.to(device)
+    with torch.no_grad():
+        outs   = model(vids)
+        logits = outs[0] if isinstance(outs, tuple) else outs
+        preds  = torch.argmax(logits, dim=1).cpu().numpy()
+
+    trues = trues.cpu().numpy()
+    B,C,T,H,W = vids.shape
+    samples   = min(n_samples, B)
+
+    fig, axes = plt.subplots(samples, n_frames,
+                             figsize=(n_frames*2, samples*2))
+    axes = np.atleast_2d(axes)
+
+    for i in range(samples):
+        vid_np = vids[i].cpu().permute(1,2,3,0).numpy()
+        vid_np = _denormalize(vid_np)
+        frames = np.linspace(0, T-1, n_frames, dtype=int)
+
+        # map index → string once
+        true_name = idx_to_cls[int(trues[i])]
+        pred_name = idx_to_cls[int(preds[i])]
+
+        for j, fidx in enumerate(frames):
+            ax = axes[i,j]
+            ax.imshow(vid_np[fidx])
+            ax.axis('off')
+            if j == 0:
+                ax.set_title(f"GT {true_name} → PR {pred_name}", fontsize=8)
+
+    fig.suptitle(f"{prefix.upper()} samples {run_id}", y=1.02)
+    out_dir = os.path.join(run_path, fig_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    fig.savefig(os.path.join(out_dir, f"{prefix}_{run_id}.png"),
+                bbox_inches='tight')
+    if close_fig:
+        plt.close(fig)
+    return fig
+
+
+# def plot_qc_predictions(loader,
+#                         model,
+#                         device,
+#                         run_path,
+#                         fig_dir,
+#                         run_id,
+#                         prefix='qc',
+#                         n_samples=4,
+#                         n_frames=8,
+#                         close_fig=True):
+#     """
+#     For n_samples videos in loader, plot n_frames each with
+#     ground-truth vs predicted label in the first frame title.
+#     """
+#     model.eval()
+#     batch = next(iter(loader))
+#     # unpack video and label(s)
+#     if isinstance(batch, dict):
+#         vids  = batch['video']
+#         trues = batch['base_label']
+#     else:
+#         vids, lbls = batch
+#         vids  = vids
+#         # single-grader: lbls is [B] or [B,B]
+#         trues = lbls[0]
+#     vids  = vids.to(device)
+#     with torch.no_grad():
+#         outs = model(vids)
+#         # pick base logits if hierarchical
+#         logits = outs[0] if isinstance(outs, tuple) else outs
+#         preds = torch.argmax(logits, dim=1).cpu().numpy()
+#     trues = trues.cpu().numpy()
+
+#     B, C, T, H, W = vids.shape
+#     samples = min(n_samples, B)
+#     fig, axes = plt.subplots(samples, n_frames,
+#                              figsize=(n_frames*2, samples*2))
+#     axes = np.atleast_2d(axes)
+
+#     for i in range(samples):
+#         vid_np = vids[i].cpu().permute(1,2,3,0).numpy()  # [T,H,W,C]
+#         vid_np = _denormalize(vid_np)
+#         idxs   = np.linspace(0, T-1, n_frames, dtype=int)
+#         for j, fidx in enumerate(idxs):
+#             ax = axes[i, j]
+#             ax.imshow(vid_np[fidx])
+#             ax.axis('off')
+#             if j == 0:
+#                 ax.set_title(f"GT {trues[i]}  → PR {preds[i]}", fontsize=8)
+
+#     fig.suptitle(f"{prefix.upper()} samples {run_id}", y=1.02)
+#     out_dir = os.path.join(run_path, fig_dir)
+#     os.makedirs(out_dir, exist_ok=True)
+#     out_path = os.path.join(out_dir, f"{prefix}_{run_id}.png")
+#     fig.savefig(out_path, bbox_inches='tight')
+#     if close_fig:
+#         plt.close(fig)
+#     return fig
+
+
+
 def plot_augmentations(loader,
                        run_path,
                        fig_dir,

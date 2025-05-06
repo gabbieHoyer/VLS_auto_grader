@@ -79,9 +79,12 @@ def log_info(*args, **kwargs):
     logging.getLogger().info(*args, **kwargs)
 
 @main_process_only
-def wandb_log(data):
+def wandb_log(data, step=None):
     import wandb
-    wandb.log(data)
+    if step is not None:
+        wandb.log(data, step=step)
+    else:
+        wandb.log(data)
 
 
 
