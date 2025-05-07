@@ -269,14 +269,12 @@ python -m src.training.eval --config config/hierarchical_singlegrader_ssl.yaml -
 
 ## Contact
 
-**Gabrielle Hoyer**
-UCSF / UC Berkeley
-[gabbie.hoyer@ucsf.edu](mailto:gabbie.hoyer@ucsf.edu)
-[gabrielle\_hoyer@berkeley.edu](mailto:gabrielle_hoyer@berkeley.edu)
-
-For questions or collaboration, feel free to reach out.
-
-
+- **Gabrielle Hoyer**  
+  - UCSF / UC Berkeley  
+  - [gabbie.hoyer@ucsf.edu](mailto:gabbie.hoyer@ucsf.edu)  
+  - [gabrielle_hoyer@berkeley.edu](mailto:gabrielle_hoyer@berkeley.edu)
+  
+For questions or collaboration, feel free to reach out via email.
 
 
 
