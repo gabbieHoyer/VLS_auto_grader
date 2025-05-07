@@ -8,6 +8,10 @@ The medical context amplifies this complexity:
 * **3D Depth Information**: The 3D nature of videos introduces depth ambiguities, necessitating precise spatial analysis.
 * **Clinical Relevance**: Classifications align with clinical standards, such as the Video Classification of Intubation (VCI) score (VCI Score), ensuring practical utility.
 
+📂 For a breakdown of the available experiment setups, model configurations, and pretraining strategies, see the detailed [Experiment Configurations Guide](config/README.md).
+
+📂 For dataset loading, label parsing, and temporal augmentation logic for both supervised and pretraining tasks, see the [Dataset and Augmentation Guide](src/data/README.md).
+
 ## Labeling System
 
 The classification label set assesses **Overall Procedure Difficulty** based on procedural success, equipment motion, anatomical displacement, and trauma, informed by metrics like time, Cormack–Lehane (CL) grade, blood/erythema, and number of attempts. Classes include:
@@ -271,6 +275,12 @@ UCSF / UC Berkeley
 [gabrielle\_hoyer@berkeley.edu](mailto:gabrielle_hoyer@berkeley.edu)
 
 For questions or collaboration, feel free to reach out.
+
+
+
+
+
+
 
 
 
