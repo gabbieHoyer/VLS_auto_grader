@@ -784,24 +784,3 @@ class EvalEngine:
 
 # -------------------------------------------------------------------------------- #
 # -------------------------------------------------------------------------------- #
-
-            # if GPUSetup.is_main_process():
-            #     log_info(f"Epoch {epoch}, Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-            #     log_info(f"Train Metrics: {train_metrics}")
-            #     log_info(f"Val Metrics: {val_metrics}")
-            #     losses['train'].append({'epoch': epoch, 'loss': train_loss})
-            #     losses['val'].append({'epoch': epoch, 'loss': val_loss})
-
-            #     if self.cfg['output_configuration'].get('use_wandb'):
-            #         log_dict = {
-            #                 'train_loss': train_loss,
-            #                 'val_loss':   val_loss,
-            #         }
-            #         flatten_metrics('train', train_metrics, log_dict)
-            #         flatten_metrics('val',   val_metrics,   log_dict)
-
-            #         # now add the learning rate
-            #         current_lr = self.optimizer.param_groups[0]['lr']
-            #         log_dict['lr'] = current_lr
-
-            #         wandb_log(log_dict, step=epoch)

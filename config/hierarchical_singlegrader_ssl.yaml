@@ -12,7 +12,7 @@ paths:
 output_configuration:
   work_dir: work_dir/runs
   task_name: vls_grading
-  use_wandb: false
+  use_wandb: true #false
   checkpoint_interval: 5
   logging_level: INFO
 
@@ -24,12 +24,11 @@ training:
   num_base_classes: 4  # Base classes: 1, 2, 3, 4
   num_subclasses: 5  # Subclasses: a, b, c, d, none
   num_classes: 8  # For metrics in non-hierarchical mode
-  batch_size: 8
+  batch_size: 16 #8
   num_workers: 1 #4
-  lr: 0.0001
+
   ssl_lr: 0.001
-  epochs: 1 #50
-  ssl_epochs: 1 #1 #2 #20
+  ssl_epochs: 20 #1 #2 #20  # Total epochs for pretraining
   ssl_pretrain: true
   pretrain_method: 'moco' # 'contrastive' #'mae', 'moco'
   subclass_loss_weight: 0.5
@@ -38,8 +37,15 @@ training:
   end_mask_ratio: 0.75      # Final mask ratio for curriculum learning
   patch_size: 16            # Patch size for masking
   temporal_consistency: 'full'  # 'full', 'partial', or 'none'
-  change_interval: 5        # For 'partial' mode: change mask every 5 frames
-  # ssl_epochs: 100           # Total epochs for pretraining
+  change_interval: 5        # For 'partial' mode: change mask every 5 frames         
+
+  lr: 0.0001
+  epochs: 50
+
+  optimizer:
+    weight_decay: 0.005 #0.01  # Reduced from 0.05 -> lessened the L2 reg effect
+  loss:
+    label_smoothing: 0.05 #0.1  # Reduced from 0.2  -> reduce to soften regularlization on the loss
 
   module:
     use_amp: True
@@ -50,7 +56,6 @@ training:
       enabled: True
       patience: 10
       min_delta: 0.0001
-
 
 evaluation:
   split: test
